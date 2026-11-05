@@ -8,12 +8,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    let welcomeMessage = "Your desktop, in motion"
     var body: some View {
         VStack {
             Image(systemName: "globe")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
-            Text("Welcome to LiveDesk")
+            Text(welcomeMessage)
         }
         .padding()
     }

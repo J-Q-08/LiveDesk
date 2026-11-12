@@ -1,22 +1,17 @@
+import AppKit
 import CoreText
 import SwiftUI
 
 enum GalleryStyle {
-    static let background = Color(rgb: 0x100925)
-    static let violet = Color(rgb: 0x5D34D0)
-    static let magenta = Color(rgb: 0xFF006E)
-    static let accent = Color(rgb: 0x00F0FF)
-    static let sidebar = Color(rgb: 0x160D32)
-    static let surface = Color(rgb: 0x251546)
-    static let border = Color.white.opacity(0.17)
-
-    static let selection = LinearGradient(colors: [violet, magenta.opacity(0.85)],
-                                          startPoint: .leading, endPoint: .trailing)
-    static let glass = LinearGradient(colors: [surface.opacity(0.82), background.opacity(0.62)],
-                                      startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let background = Color(red: 0.07, green: 0.09, blue: 0.15)
+    static let sidebar = Color(red: 0.15, green: 0.18, blue: 0.26)
+    static let surface = Color.white.opacity(0.09)
+    static let accent = Color(red: 0.70, green: 0.83, blue: 1)
+    static let blue = Color(red: 0.22, green: 0.43, blue: 0.90)
+    static let border = Color.white.opacity(0.14)
 
     static func display(_ size: CGFloat, relativeTo style: Font.TextStyle = .title) -> Font {
-        .custom("InterVariable", size: size, relativeTo: style).weight(.heavy)
+        .custom("InterVariable", size: size, relativeTo: style).weight(.semibold)
     }
 
     static func registerFonts() {
@@ -25,19 +20,19 @@ enum GalleryStyle {
     }
 }
 
-struct AuroraMesh: View {
+struct GalleryBackdrop: View {
     var body: some View {
         GeometryReader { geometry in
-            let width = geometry.size.width
-            let radius = max(width, geometry.size.height)
+            let radius = max(geometry.size.width, geometry.size.height)
             ZStack {
-                GalleryStyle.background
-                RadialGradient(colors: [GalleryStyle.violet, .clear], center: .init(x: 0.23, y: 0.37),
-                               startRadius: width * 0.04, endRadius: radius * 0.62)
-                RadialGradient(colors: [GalleryStyle.magenta.opacity(0.74), .clear],
-                               center: .init(x: 0.95, y: 0.45), startRadius: 0, endRadius: radius * 0.52)
-                RadialGradient(colors: [GalleryStyle.accent.opacity(0.57), .clear],
-                               center: .init(x: 0.65, y: 1.1), startRadius: 0, endRadius: radius * 0.58)
+                WindowMaterial()
+                GalleryStyle.background.opacity(0.53)
+                RadialGradient(colors: [Color(red: 0.20, green: 0.43, blue: 0.59).opacity(0.44), .clear],
+                               center: .topLeading, startRadius: 0, endRadius: radius * 0.65)
+                RadialGradient(colors: [Color(red: 0.49, green: 0.16, blue: 0.17).opacity(0.38), .clear],
+                               center: .bottomLeading, startRadius: 0, endRadius: radius * 0.72)
+                RadialGradient(colors: [Color(red: 0.28, green: 0.24, blue: 0.52).opacity(0.30), .clear],
+                               center: .bottomTrailing, startRadius: 0, endRadius: radius * 0.52)
             }
         }
         .accessibilityHidden(true)
@@ -45,28 +40,46 @@ struct AuroraMesh: View {
     }
 }
 
-struct AuroraActionStyle: ButtonStyle {
+private struct WindowMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = BackdropView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+
+    private final class BackdropView: NSVisualEffectView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.isOpaque = false
+            window?.backgroundColor = .clear
+            window?.titlebarAppearsTransparent = true
+        }
+    }
+}
+
+extension View {
+    func glassPanel(cornerRadius: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius)
+        return background(.regularMaterial, in: shape)
+            .background(GalleryStyle.background.opacity(0.24), in: shape)
+            .overlay { shape.strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
+    }
+}
+
+struct GlassActionStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .fontWeight(.semibold)
-            .foregroundStyle(GalleryStyle.background)
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            .background(GalleryStyle.accent, in: Capsule())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .background(GalleryStyle.blue.opacity(configuration.isPressed ? 0.75 : 1), in: Capsule())
             .contentShape(Capsule())
-            .shadow(color: GalleryStyle.accent.opacity(0.5), radius: 14)
             .opacity(isEnabled ? 1 : 0.45)
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
-            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.65), value: configuration.isPressed)
-    }
-}
-
-private extension Color {
-    init(rgb: UInt32) {
-        self.init(red: Double((rgb >> 16) & 255) / 255,
-                  green: Double((rgb >> 8) & 255) / 255,
-                  blue: Double(rgb & 255) / 255)
     }
 }

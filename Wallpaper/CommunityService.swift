@@ -135,14 +135,14 @@ enum CommunityService {
         return true
     }
 
-    static func download(wallpaper: CommunityWallpaper, existing: [LibraryVideo]) async throws -> LibraryVideo {
+    static func download(wallpaper: CommunityWallpaper) async throws -> LibraryVideo {
         guard ["mp4", "mov", "m4v"].contains(wallpaper.fileExtension.lowercased()),
               let url = mediaURL(path: wallpaper.videoPath) else { throw CommunityError.unsupportedVideo }
         let (temporary, response) = try await URLSession.shared.download(from: url)
         try check(response)
         return try await Task.detached(priority: .userInitiated) {
             try VideoLibrary.importVideo(from: temporary, extension: wallpaper.fileExtension,
-                                         title: wallpaper.title, existing: existing, communityID: wallpaper.id)
+                                         title: wallpaper.title, communityID: wallpaper.id)
         }.value
     }
 

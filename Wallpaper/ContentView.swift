@@ -709,18 +709,17 @@ struct ContentView: View {
         Task {
             do {
                 let session = try await communityAuth.validSession()
-                let currentLibrary = library
                 let fileExtension = url.pathExtension
                 let video = try await Task.detached(priority: .userInitiated) {
                     try VideoLibrary.validateForUpload(url)
                     return try VideoLibrary.importVideo(from: url, extension: fileExtension,
-                                                        title: title, existing: currentLibrary)
+                                                        title: title)
                 }.value
-                library.append(video)
+                library = try VideoLibrary.load()
                 do {
                     let source = try VideoLibrary.url(for: video)
                     let item = try await CommunityService.publish(video: video, source: source, session: session)
-                    library = try VideoLibrary.markPublished(video, communityID: item.id, existing: library)
+                    library = try VideoLibrary.markPublished(video, communityID: item.id)
                     videoError = nil
                     await loadCommunity()
                     await loadMyCloud(userID: session.userID)
@@ -744,8 +743,7 @@ struct ContentView: View {
                 let source = try VideoLibrary.url(for: video)
                 let session = try await communityAuth.validSession()
                 let item = try await CommunityService.publish(video: video, source: source, session: session)
-                library = try VideoLibrary.markPublished(video, communityID: item.id,
-                                                         existing: library)
+                library = try VideoLibrary.markPublished(video, communityID: item.id)
                 communityError = nil
                 await loadCommunity()
                 await loadMyCloud(userID: session.userID)
@@ -767,8 +765,8 @@ struct ContentView: View {
         isDownloading = true
         Task {
             do {
-                let video = try await CommunityService.download(wallpaper: item, existing: library)
-                library.append(video)
+                let video = try await CommunityService.download(wallpaper: item)
+                library = try VideoLibrary.load()
                 select(video)
                 section = .library
                 detailID = video.id.uuidString
@@ -786,8 +784,8 @@ struct ContentView: View {
             return
         }
         do {
-            try VideoLibrary.remove(video, existing: library)
-            library.removeAll { $0.id == video.id }
+            try VideoLibrary.remove(video)
+            library = try VideoLibrary.load()
             if selectedLibraryVideoID == video.id.uuidString {
                 selectSample()
                 detailID = nil

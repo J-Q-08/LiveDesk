@@ -16,6 +16,7 @@ struct LibraryVideo: Codable, Identifiable, Sendable {
 
 enum VideoLibrary {
     nonisolated static let maxUploadBytes = 52_428_800
+    nonisolated private static let indexLock = NSLock()
 
     nonisolated static func validateForUpload(_ source: URL) throws {
         guard ["mp4", "mov", "m4v"].contains(source.pathExtension.lowercased()) else {
@@ -57,6 +58,10 @@ enum VideoLibrary {
     }
 
     nonisolated static func load() throws -> [LibraryVideo] {
+        try indexLock.withLock { try loadUnlocked() }
+    }
+
+    nonisolated private static func loadUnlocked() throws -> [LibraryVideo] {
         let index = try indexURL
         guard FileManager.default.fileExists(atPath: index.path) else { return [] }
         return try JSONDecoder().decode([LibraryVideo].self, from: Data(contentsOf: index))
@@ -70,56 +75,61 @@ enum VideoLibrary {
         return file
     }
 
-    nonisolated static func importVideo(from source: URL, existing: [LibraryVideo]) throws -> LibraryVideo {
+    nonisolated static func importVideo(from source: URL) throws -> LibraryVideo {
         try importVideo(from: source, extension: source.pathExtension,
-                        title: source.deletingPathExtension().lastPathComponent, existing: existing)
+                        title: source.deletingPathExtension().lastPathComponent)
     }
 
     nonisolated static func importVideo(from source: URL, extension fileExtension: String,
-                                       title: String, existing: [LibraryVideo],
+                                       title: String,
                                        communityID: String? = nil) throws -> LibraryVideo {
         let hasScopedAccess = source.startAccessingSecurityScopedResource()
         defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
         let id = UUID()
         let filename = id.uuidString + "." + fileExtension.lowercased()
         let destination = try directory.appendingPathComponent(filename)
-        try FileManager.default.copyItem(at: source, to: destination)
-        do {
-            let video = LibraryVideo(id: id, name: title, filename: filename,
-                                     communityID: communityID)
-            let data = try JSONEncoder().encode(existing + [video])
-            try data.write(to: indexURL, options: .atomic)
-            return video
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            throw error
+        return try indexLock.withLock {
+            try FileManager.default.copyItem(at: source, to: destination)
+            do {
+                let video = LibraryVideo(id: id, name: title, filename: filename,
+                                         communityID: communityID)
+                let data = try JSONEncoder().encode(loadUnlocked() + [video])
+                try data.write(to: indexURL, options: .atomic)
+                return video
+            } catch {
+                try? FileManager.default.removeItem(at: destination)
+                throw error
+            }
         }
     }
 
-    nonisolated static func markPublished(_ video: LibraryVideo, communityID: String,
-                                          existing: [LibraryVideo]) throws -> [LibraryVideo] {
-        let updated = existing.map { item in
-            item.id == video.id
-                ? LibraryVideo(id: item.id, name: item.name, filename: item.filename,
-                               communityID: communityID)
-                : item
+    nonisolated static func markPublished(_ video: LibraryVideo, communityID: String) throws -> [LibraryVideo] {
+        try indexLock.withLock {
+            let updated = try loadUnlocked().map { item in
+                item.id == video.id
+                    ? LibraryVideo(id: item.id, name: item.name, filename: item.filename,
+                                   communityID: communityID)
+                    : item
+            }
+            try JSONEncoder().encode(updated).write(to: indexURL, options: .atomic)
+            return updated
         }
-        try JSONEncoder().encode(updated).write(to: indexURL, options: .atomic)
-        return updated
     }
 
-    nonisolated static func remove(_ video: LibraryVideo, existing: [LibraryVideo]) throws {
-        let remaining = existing.filter { $0.id != video.id }
-        let original = try directory.appendingPathComponent(video.filename)
-        let staged = try directory.appendingPathComponent(".deleting-\(video.filename)")
-        try FileManager.default.moveItem(at: original, to: staged)
-        do {
-            try JSONEncoder().encode(remaining).write(to: indexURL, options: .atomic)
-        } catch {
-            try? FileManager.default.moveItem(at: staged, to: original)
-            throw error
+    nonisolated static func remove(_ video: LibraryVideo) throws {
+        try indexLock.withLock {
+            let remaining = try loadUnlocked().filter { $0.id != video.id }
+            let original = try directory.appendingPathComponent(video.filename)
+            let staged = try directory.appendingPathComponent(".deleting-\(video.filename)")
+            try FileManager.default.moveItem(at: original, to: staged)
+            do {
+                try JSONEncoder().encode(remaining).write(to: indexURL, options: .atomic)
+            } catch {
+                try? FileManager.default.moveItem(at: staged, to: original)
+                throw error
+            }
+            try? FileManager.default.removeItem(at: staged)
         }
-        try? FileManager.default.removeItem(at: staged)
     }
 }
 

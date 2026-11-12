@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct WallpaperApp: App {
+    @StateObject private var desktop = DesktopWallpaperController()
+
     var body: some Scene {
         WindowGroup("LiveDesk") {
-            ContentView()
+            ContentView(desktop: desktop)
         }
     }
 }

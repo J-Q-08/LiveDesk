@@ -8,18 +8,12 @@
 import SwiftUI
 import AVFoundation
 import AppKit
-import CoreGraphics
 import UniformTypeIdentifiers
 import ServiceManagement
 
 struct ContentView: View {
     @State private var playback: VideoPlayback?
-    @State private var desktopPlayers: [String: VideoPlayback] = [:]
-    @State private var desktopWindows: [String: NSWindow] = [:]
-    @State private var desktopGeneration = 0
-    @State private var isDesktopPaused = false
-    @State private var desktopTarget: (url: URL, layout: VideoLayout)?
-    @State private var loadingDisplays: Set<String> = []
+    @ObservedObject var desktop: DesktopWallpaperController
     @State private var showVideoPicker = false
     @State private var showUploadNameSheet = false
     @State private var pendingUploadURL: URL?
@@ -51,7 +45,6 @@ struct ContentView: View {
     @State private var isPublishing = false
     @State private var downloadingTitle: String?
     @State private var downloadError: String?
-    @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
     @State private var previewError: String?
@@ -62,8 +55,6 @@ struct ContentView: View {
     @State private var accountMessage: String?
     @State private var isAuthenticating = false
     @State private var isCreatingAccount = false
-    @AppStorage("appliedVideoID") private var appliedVideoID = ""
-    @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
 
     private var searchText: String { searches[section] ?? "" }
@@ -87,7 +78,7 @@ struct ContentView: View {
             (browseFilter == .all ||
              (browseFilter == .imports && item.id != "sample") ||
              (browseFilter == .sample && item.id == "sample") ||
-             (browseFilter == .active && item.id == appliedVideoID))
+             (browseFilter == .active && item.id == desktop.appliedVideoID))
         }
         return sortByName ? items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending } : items
     }
@@ -136,7 +127,6 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displayConfiguration += 1
-            syncDesktopDisplays()
         }
         .fileImporter(isPresented: $showVideoPicker, allowedContentTypes: [.movie]) { result in
             switch result {
@@ -239,24 +229,28 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            if !appliedVideoID.isEmpty {
+            if !desktop.appliedVideoID.isEmpty {
                 Divider()
                 Button {
-                    setDesktopPaused(!isDesktopPaused)
+                    desktop.setDesktopPaused(!desktop.isDesktopPaused)
                 } label: {
-                    Label(isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper",
-                          systemImage: isDesktopPaused ? "play.fill" : "pause.fill")
+                    Label(desktop.isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper",
+                          systemImage: desktop.isDesktopPaused ? "play.fill" : "pause.fill")
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
-                .disabled(desktopTarget == nil)
+                .disabled(!desktop.canPause)
                 Button {
-                    stopDesktopWallpaper()
+                    desktop.stop()
+                    if browseFilter == .active { browseFilter = .all }
                 } label: {
                     Label("Stop Wallpaper", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
+            }
+            if let error = desktop.error {
+                Text(error).font(.caption).foregroundStyle(.orange)
             }
             Label(connectionStatus.title, systemImage: connectionStatus.icon)
                 .font(.caption)
@@ -514,7 +508,7 @@ struct ContentView: View {
                                         Button("Remove from Library", role: .destructive) {
                                             videoToDelete = video
                                         }
-                                        .disabled(appliedVideoID == video.id.uuidString)
+                                        .disabled(desktop.appliedVideoID == video.id.uuidString)
                                     }
                             }
                         }
@@ -894,7 +888,7 @@ struct ContentView: View {
     }
 
     private func removeVideo(_ video: LibraryVideo) {
-        guard appliedVideoID != video.id.uuidString else {
+        guard desktop.appliedVideoID != video.id.uuidString else {
             videoError = "Change the active desktop wallpaper before removing this video."
             return
         }
@@ -914,10 +908,7 @@ struct ContentView: View {
         do {
             library = try VideoLibrary.load()
             configureLoginItem()
-            if !didRestoreWallpaper {
-                didRestoreWallpaper = true
-                Task { await restoreDesktopBackground() }
-            }
+            desktop.restoreIfNeeded(from: library)
         } catch {
             videoError = "Couldn’t load your video library: \(error.localizedDescription)"
         }
@@ -925,40 +916,7 @@ struct ContentView: View {
 
     private func setDesktopBackground(_ item: WallpaperItem) {
         guard let playback, playback.sourceURL == item.url, detailID == item.id else { return }
-        isDesktopPaused = false
-        applyDesktopBackground(playback, layout: videoLayout)
-        appliedVideoID = item.id
-        appliedVideoLayout = videoLayout.rawValue
-    }
-
-    private func setDesktopPaused(_ paused: Bool) {
-        isDesktopPaused = paused
-        for playback in desktopPlayers.values {
-            updateDesktopPlayback(playback)
-        }
-    }
-
-    private func updateDesktopPlayback(_ playback: VideoPlayback) {
-        if isDesktopPaused {
-            playback.desktopPlayer.pause()
-        } else {
-            playback.desktopPlayer.play()
-        }
-    }
-
-    private func stopDesktopWallpaper() {
-        desktopGeneration += 1
-        desktopTarget = nil
-        loadingDisplays.removeAll()
-        setDesktopPaused(true)
-        for window in desktopWindows.values {
-            window.close()
-        }
-        desktopWindows.removeAll()
-        desktopPlayers.removeAll()
-        isDesktopPaused = false
-        appliedVideoID = ""
-        if browseFilter == .active { browseFilter = .all }
+        desktop.apply(playback, id: item.id, layout: videoLayout)
     }
 
     private func exportStillImage(from url: URL) {
@@ -978,122 +936,6 @@ struct ContentView: View {
             } catch {
                 videoError = "Couldn’t export a still image: \(error.localizedDescription)"
             }
-        }
-    }
-
-    private func applyDesktopBackground(_ newPlayback: VideoPlayback, layout: VideoLayout) {
-        desktopGeneration += 1
-        desktopTarget = (newPlayback.sourceURL, layout)
-        loadingDisplays.removeAll()
-        if let primary = NSScreen.main ?? NSScreen.screens.first {
-            installDesktopWindow(on: primary, playback: newPlayback, layout: layout)
-        }
-        syncDesktopDisplays()
-    }
-
-    private func screenID(_ screen: NSScreen) -> String {
-        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-            return number.stringValue
-        }
-        return "\(screen.frame.origin.x),\(screen.frame.origin.y)"
-    }
-
-    private func installDesktopWindow(on screen: NSScreen, playback: VideoPlayback, layout: VideoLayout) {
-        let id = screenID(screen)
-        if let window = desktopWindows[id], let view = window.contentView as? VideoCanvasView {
-            let previous = desktopPlayers[id]
-            window.setFrame(screen.frame, display: true)
-            view.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
-                           layout: layout, isPreview: false)
-            desktopPlayers[id] = playback
-            updateDesktopPlayback(playback)
-            if previous !== playback { previous?.desktopPlayer.pause() }
-            return
-        }
-        let window = NSWindow(contentRect: screen.frame, styleMask: .borderless,
-                              backing: .buffered, defer: false)
-        let videoView = VideoCanvasView(frame: NSRect(origin: .zero, size: screen.frame.size))
-        videoView.autoresizingMask = [.width, .height]
-        videoView.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
-                            layout: layout, isPreview: false)
-        window.contentView = videoView
-        window.setFrame(screen.frame, display: true)
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        window.isReleasedWhenClosed = false
-        window.ignoresMouseEvents = true
-        window.hasShadow = false
-        desktopWindows[id] = window
-        desktopPlayers[id] = playback
-        updateDesktopPlayback(playback)
-        let iconLevel = CGWindowLevelForKey(.desktopIconWindow)
-        window.level = NSWindow.Level(rawValue: Int(iconLevel) - 1)
-        window.orderFront(nil)
-    }
-
-    private func loadDesktopWindow(on screen: NSScreen, url: URL, layout: VideoLayout, generation: Int) {
-        let id = screenID(screen)
-        guard loadingDisplays.insert(id).inserted else { return }
-        Task {
-            defer {
-                if generation == desktopGeneration { loadingDisplays.remove(id) }
-            }
-            do {
-                let player = try await VideoPlayback.load(url, requiresFileAccess: false)
-                guard generation == desktopGeneration,
-                      let connected = NSScreen.screens.first(where: { screenID($0) == id }) else { return }
-                installDesktopWindow(on: connected, playback: player, layout: layout)
-            } catch {
-                guard generation == desktopGeneration,
-                      NSScreen.screens.contains(where: { screenID($0) == id }) else { return }
-                videoError = "Couldn’t play the wallpaper on \(screen.localizedName): \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func removeDisconnectedDisplays() {
-        let connected = Set(NSScreen.screens.map(screenID))
-        for id in desktopWindows.keys.filter({ !connected.contains($0) }) {
-            desktopPlayers[id]?.desktopPlayer.pause()
-            desktopWindows[id]?.close()
-            desktopPlayers.removeValue(forKey: id)
-            desktopWindows.removeValue(forKey: id)
-        }
-    }
-
-    private func syncDesktopDisplays() {
-        guard let target = desktopTarget else { return }
-        removeDisconnectedDisplays()
-        for screen in NSScreen.screens {
-            let id = screenID(screen)
-            if let playback = desktopPlayers[id], playback.sourceURL == target.url {
-                installDesktopWindow(on: screen, playback: playback, layout: target.layout)
-            } else {
-                loadDesktopWindow(on: screen, url: target.url, layout: target.layout,
-                                  generation: desktopGeneration)
-            }
-        }
-    }
-
-    private func restoreDesktopBackground() async {
-        guard !appliedVideoID.isEmpty, desktopTarget == nil else { return }
-        let generation = desktopGeneration
-        let url: URL?
-        if appliedVideoID == "sample" {
-            url = Bundle.main.url(forResource: "sample", withExtension: "mp4")
-        } else if let video = library.first(where: { $0.id.uuidString == appliedVideoID }) {
-            url = try? VideoLibrary.url(for: video)
-        } else {
-            url = nil
-        }
-        guard let url else { return }
-        do {
-            let restored = try await VideoPlayback.load(url, requiresFileAccess: false)
-            try Task.checkCancellation()
-            guard generation == desktopGeneration else { return }
-            applyDesktopBackground(restored, layout: VideoLayout(rawValue: appliedVideoLayout) ?? .fill)
-        } catch {
-            guard !Task.isCancelled, generation == desktopGeneration else { return }
-            videoError = "Couldn’t restore your desktop background: \(error.localizedDescription)"
         }
     }
 
@@ -1279,5 +1121,5 @@ private struct MasonryColumns<Item: Identifiable, Tile: View>: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(desktop: DesktopWallpaperController())
 }

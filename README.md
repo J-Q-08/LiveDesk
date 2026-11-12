@@ -1,17 +1,11 @@
 # LiveDesk
 
-LiveDesk is a macOS video wallpaper app. The Mac app stores imported videos locally. The community server stores videos that people explicitly publish, plus a SQLite catalog that Discover reads.
+LiveDesk is a macOS video wallpaper app. Imported videos live on your Mac in the local Library. Discover loads community wallpapers from Supabase; it refreshes every 20 seconds while open. Selecting a community wallpaper downloads a copy into your Library. A video only becomes public when you choose **Publish to Discover** in Submissions and confirm.
 
-## Try the shared library locally
+## Run
 
-1. In Terminal, run `cd server && uv run uvicorn app:app --host 127.0.0.1 --port 8787`.
-2. Open `Wallpaper.xcodeproj` in Xcode and run the `Wallpaper` scheme.
-3. Import a video. It remains private in your Library.
-4. Open **Submissions** and select **Publish to Discover** for that video.
-5. Open **Discover**. Select the shared video to download a copy into your Library.
+Open `Wallpaper.xcodeproj` in Xcode and run the Wallpaper scheme. You can import a video from **Submissions**. To publish, create an account or sign in there, then select **Publish to Discover** on an imported video. New accounts may need email confirmation before signing in.
 
-The app points to `http://localhost:8787` by default. You can change the server URL in Discover. The server's database and uploaded videos live in `server/data/`, which Git ignores. See [server/README.md](server/README.md) for server details.
+Community metadata is in the Supabase `public.wallpapers` table, and media is in the public `wallpapers` Storage bucket. The schema and row-level security policies are in `supabase/migrations/`. The app contains a publishable key only; it never contains a service role or secret key. Authentication sessions are kept in the macOS Keychain. The current community upload limit is 50 MB per video.
 
-## Current release status
-
-This is a local prototype. The server is not deployed and does not have user accounts or abuse controls. Do not expose it to the public internet yet. The Mac app also has an experimental live Lock Screen integration that still needs real-device validation.
+The desktop wallpaper and Lock Screen support remain experimental and need validation across macOS versions and multiple displays.

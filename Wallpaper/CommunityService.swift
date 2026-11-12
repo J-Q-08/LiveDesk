@@ -2,73 +2,115 @@ import Foundation
 import AVFoundation
 import AppKit
 
-struct CommunityWallpaper: Codable, Identifiable, Sendable {
+struct CommunityWallpaper: Decodable, Identifiable, Sendable {
     let id: String
     let title: String
     let createdAt: String
     let videoPath: String
-    let thumbnailPath: String
+    let thumbnailPath: String?
     let fileExtension: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, title
+        case createdAt = "created_at"
+        case videoPath = "video_path"
+        case thumbnailPath = "thumbnail_path"
+        case fileExtension = "file_extension"
+    }
 }
 
 enum CommunityService {
-    static func baseURL(_ address: String) throws -> URL {
-        guard let url = URL(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let host = url.host,
-              url.scheme == "https" ||
-                (url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host)) else {
-            throw CommunityError.invalidServer
-        }
-        return url
+    static let projectURL = URL(string: "https://tbhegscgjjaiiwoqooak.supabase.co")!
+    static let publishableKey = "sb_publishable_Mza44-XuiiHkBkaVIOqWPg_GgZWfJTe"
+    private static let bucket = "wallpapers"
+
+    static func mediaURL(path: String?) -> URL? {
+        guard let path else { return nil }
+        return projectURL.appending(path: "storage/v1/object/public/\(bucket)/\(path)")
     }
 
-    static func list(server: String, query: String = "", offset: Int = 0) async throws -> [CommunityWallpaper] {
-        var components = URLComponents(url: try baseURL(server).appending(path: "api/wallpapers"),
-                                       resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "offset", value: String(offset)),
-                                 URLQueryItem(name: "limit", value: "50")]
-        if !query.isEmpty { components.queryItems?.append(URLQueryItem(name: "q", value: query)) }
-        let (data, response) = try await URLSession.shared.data(from: components.url!)
-        try check(response)
+    static func list(query: String = "", offset: Int = 0) async throws -> [CommunityWallpaper] {
+        var components = URLComponents(url: projectURL.appending(path: "rest/v1/wallpapers"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            .init(name: "select", value: "id,title,created_at,video_path,thumbnail_path,file_extension"),
+            .init(name: "order", value: "created_at.desc,id.desc"),
+            .init(name: "limit", value: "50"),
+            .init(name: "offset", value: String(offset))
+        ]
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !term.isEmpty { components.queryItems?.append(.init(name: "title", value: "ilike.*\(term)*")) }
+        var request = URLRequest(url: components.url!)
+        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response, data: data)
         return try JSONDecoder().decode([CommunityWallpaper].self, from: data)
     }
 
-    static func publish(server: String, video: LibraryVideo, source: URL) async throws -> CommunityWallpaper {
-        var components = URLComponents(url: try baseURL(server).appending(path: "api/wallpapers"),
-                                       resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "title", value: video.name)]
-        var request = URLRequest(url: components.url!)
+    static func publish(video: LibraryVideo, source: URL, session: CommunitySession) async throws -> CommunityWallpaper {
+        let fileExtension = source.pathExtension.lowercased()
+        guard ["mp4", "mov", "m4v"].contains(fileExtension) else { throw CommunityError.unsupportedVideo }
+        let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        let fileSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        guard fileSize <= 52_428_800 else { throw CommunityError.tooLarge }
+        let id = UUID().uuidString.lowercased()
+        let path = "\(session.userID)/\(id).\(fileExtension)"
+        try await upload(source, path: path, mimeType: fileExtension == "mov" ? "video/quicktime" : "video/mp4", token: session.accessToken)
+        var thumbnailPath: String?
+        if let thumbnail = try? await thumbnail(for: source) {
+            let candidate = "\(session.userID)/\(id).png"
+            if (try? await upload(thumbnail, path: candidate, mimeType: "image/png", token: session.accessToken)) != nil {
+                thumbnailPath = candidate
+            }
+        }
+        var request = URLRequest(url: projectURL.appending(path: "rest/v1/wallpapers"))
         request.httpMethod = "POST"
-        request.setValue(source.pathExtension.lowercased(), forHTTPHeaderField: "X-Wallpaper-Extension")
-        request.setValue(video.id.uuidString, forHTTPHeaderField: "X-Wallpaper-ID")
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: source)
-        try check(response)
-        let published = try JSONDecoder().decode(CommunityWallpaper.self, from: data)
-
-        // A failed thumbnail should not turn a successful publication into a retry and duplicate post.
-        if let image = try? await thumbnail(for: source) {
-            var thumbnailRequest = URLRequest(url: try baseURL(server).appending(path: published.thumbnailPath))
-            thumbnailRequest.httpMethod = "PUT"
-            thumbnailRequest.setValue("image/png", forHTTPHeaderField: "Content-Type")
-            _ = try? await URLSession.shared.upload(for: thumbnailRequest, from: image)
+        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "id": id, "owner_id": session.userID, "title": String(video.name.prefix(100)),
+            "video_path": path, "thumbnail_path": thumbnailPath as Any? ?? NSNull(), "file_extension": fileExtension
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try check(response, data: data)
+        guard let published = try JSONDecoder().decode([CommunityWallpaper].self, from: data).first else {
+            throw CommunityError.invalidResponse
         }
         return published
     }
 
-    static func download(server: String, wallpaper: CommunityWallpaper,
-                         existing: [LibraryVideo]) async throws -> LibraryVideo {
-        guard ["mp4", "mov", "m4v"].contains(wallpaper.fileExtension.lowercased()) else {
-            throw CommunityError.unsupportedVideo
-        }
-        let url = try baseURL(server).appending(path: wallpaper.videoPath)
+    static func download(wallpaper: CommunityWallpaper, existing: [LibraryVideo]) async throws -> LibraryVideo {
+        guard ["mp4", "mov", "m4v"].contains(wallpaper.fileExtension.lowercased()),
+              let url = mediaURL(path: wallpaper.videoPath) else { throw CommunityError.unsupportedVideo }
         let (temporary, response) = try await URLSession.shared.download(from: url)
         try check(response)
         return try await Task.detached(priority: .userInitiated) {
             try VideoLibrary.importVideo(from: temporary, extension: wallpaper.fileExtension,
-                                         title: wallpaper.title, existing: existing,
-                                         communityID: wallpaper.id)
+                                         title: wallpaper.title, existing: existing, communityID: wallpaper.id)
         }.value
+    }
+
+    private static func upload(_ file: URL, path: String, mimeType: String, token: String) async throws {
+        let request = uploadRequest(path: path, mimeType: mimeType, token: token)
+        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: file)
+        try check(response, data: data)
+    }
+
+    private static func upload(_ data: Data, path: String, mimeType: String, token: String) async throws {
+        var request = uploadRequest(path: path, mimeType: mimeType, token: token)
+        request.httpBody = data
+        let (result, response) = try await URLSession.shared.data(for: request)
+        try check(response, data: result)
+    }
+
+    private static func uploadRequest(path: String, mimeType: String, token: String) -> URLRequest {
+        var request = URLRequest(url: projectURL.appending(path: "storage/v1/object/\(bucket)/\(path)"))
+        request.httpMethod = "POST"
+        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        return request
     }
 
     private static func thumbnail(for source: URL) async throws -> Data {
@@ -82,22 +124,22 @@ enum CommunityService {
         return data
     }
 
-    private static func check(_ response: URLResponse) throws {
+    static func check(_ response: URLResponse, data: Data = Data()) throws {
         guard let http = response as? HTTPURLResponse else { throw CommunityError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
-            throw CommunityError.server(http.statusCode)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw CommunityError.server(http.statusCode, String(body.prefix(240)))
         }
     }
 
     private enum CommunityError: LocalizedError {
-        case invalidServer, invalidResponse, unsupportedVideo, server(Int)
-
+        case invalidResponse, unsupportedVideo, tooLarge, server(Int, String)
         var errorDescription: String? {
             switch self {
-            case .invalidServer: "Use an HTTPS server address, or HTTP on this Mac."
-            case .invalidResponse: "The community server returned an invalid response."
-            case .unsupportedVideo: "This shared video has an unsupported file type."
-            case .server(let code): "The community server returned error \(code)."
+            case .invalidResponse: "The community service returned an invalid response."
+            case .unsupportedVideo: "Choose an MP4, MOV, or M4V video."
+            case .tooLarge: "The community upload limit is 50 MB."
+            case .server(let code, let detail): "Community service error \(code): \(detail)"
             }
         }
     }

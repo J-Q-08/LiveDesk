@@ -23,7 +23,7 @@ struct ContentView: View {
     @State private var videoError: String?
     @State private var videoLayout: VideoLayout = .fill
     @State private var displayConfiguration = 0
-    @State private var section: AppSection = .browse
+    @State private var section: AppSection = .discover
     @State private var detailID: String?
     @State private var searchText = ""
     @State private var isGrid = true
@@ -42,15 +42,15 @@ struct ContentView: View {
     @State private var launchAtLogin = false
     @State private var loginError: String?
     @State private var previewIsLoading = false
+    @StateObject private var communityAuth = CommunityAuth.shared
+    @State private var accountEmail = ""
+    @State private var accountPassword = ""
+    @State private var accountMessage: String?
+    @State private var isAuthenticating = false
     @AppStorage("selectedLibraryVideoID") private var selectedLibraryVideoID = ""
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
-    @AppStorage("communityServerAddress") private var communityServerAddress = "http://localhost:8787"
-
-    private var selectedName: String {
-        library.first(where: { $0.id.uuidString == selectedLibraryVideoID })?.name ?? "Sample video"
-    }
 
     private var allItems: [WallpaperItem] {
         let sample = Bundle.main.url(forResource: "sample", withExtension: "mp4")
@@ -62,7 +62,7 @@ struct ContentView: View {
         return sample + imports
     }
 
-    private var browseItems: [WallpaperItem] {
+    private var libraryItems: [WallpaperItem] {
         let items = allItems.filter { item in
             (searchText.isEmpty || item.name.localizedCaseInsensitiveContains(searchText)) &&
             (browseFilter == .all ||
@@ -116,7 +116,7 @@ struct ContentView: View {
                         }.value
                         library.append(video)
                         select(video)
-                        section = .browse
+                        section = .library
                         detailID = video.id.uuidString
                     } catch {
                         videoError = "Couldn’t import video: \(error.localizedDescription)"
@@ -147,23 +147,15 @@ struct ContentView: View {
                 videoToPublish = nil
             }
         } message: {
-            Text("Everyone using this server can download this video. Publish only videos you have the right to share.")
+            Text("Everyone using LiveDesk can download this video. Publish only videos you have the right to share.")
         }
-        .task(id: "\(section.rawValue)|\(searchText)|\(communityServerAddress)") {
+        .task(id: "\(section.rawValue)|\(searchText)") {
             guard section == .discover else { return }
-            do {
-                isLoadingCommunity = true
-                try await Task.sleep(for: .milliseconds(250))
-                let items = try await CommunityService.list(server: communityServerAddress,
-                                                            query: searchText)
-                try Task.checkCancellation()
-                communityItems = items
-                communityHasMore = items.count == 50
-                communityError = nil
-            } catch {
-                if !Task.isCancelled { communityError = "Couldn’t load Discover: \(error.localizedDescription)" }
+            while !Task.isCancelled {
+                await loadCommunity()
+                do { try await Task.sleep(for: .seconds(20)) }
+                catch { break }
             }
-            isLoadingCommunity = false
         }
         .task(id: selectedVideo?.id) {
             previewIsLoading = true
@@ -226,14 +218,7 @@ struct ContentView: View {
             Text(detailID == nil ? section.title : "Wallpaper Preview")
                 .font(.title2.bold())
             Spacer()
-            Button {
-                showVideoPicker = true
-            } label: {
-                Label(isImporting ? "Importing…" : "Import Video", systemImage: "plus")
-            }
-            .disabled(isImporting)
-            .buttonStyle(.bordered)
-            if section == .browse && detailID == nil {
+            if section == .library && detailID == nil {
                 HStack(spacing: 2) {
                     Button { isGrid = true } label: { Image(systemName: "square.grid.2x2") }
                         .help("Grid view")
@@ -273,8 +258,6 @@ struct ContentView: View {
         switch section {
         case .discover:
             discoverView
-        case .browse:
-            browseView
         case .submissions:
             submissionsView
         case .library:
@@ -282,18 +265,18 @@ struct ContentView: View {
         }
     }
 
-    private var browseView: some View {
+    private var libraryView: some View {
         ScrollView {
             if isGrid {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
-                    ForEach(browseItems) { item in
+                    ForEach(libraryItems) { item in
                         wallpaperTile(item)
                     }
                 }
                 .padding(24)
             } else {
                 LazyVStack(spacing: 12) {
-                    ForEach(browseItems) { item in
+                    ForEach(libraryItems) { item in
                         wallpaperTile(item).frame(maxWidth: 520)
                     }
                 }
@@ -302,7 +285,7 @@ struct ContentView: View {
             }
         }
         .overlay {
-            if browseItems.isEmpty {
+            if libraryItems.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             }
         }
@@ -312,12 +295,9 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Community wallpapers").font(.title.bold())
-                Text("Videos shared by everyone on this server. Select one to add it to your library.")
+                Text("Videos shared by the community. Select one to add it to your library.")
                     .foregroundStyle(.secondary)
                 HStack {
-                    TextField("Community server URL", text: $communityServerAddress)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 360)
                     if isLoadingCommunity { ProgressView().controlSize(.small) }
                     Button("Refresh") { Task { await loadCommunity() } }
                 }
@@ -333,8 +313,7 @@ struct ContentView: View {
                         ForEach(communityItems) { item in
                             Button { download(item) } label: {
                                 VStack(alignment: .leading, spacing: 0) {
-                                    AsyncImage(url: try? CommunityService.baseURL(communityServerAddress)
-                                        .appending(path: item.thumbnailPath)) { image in
+                                    AsyncImage(url: CommunityService.mediaURL(path: item.thumbnailPath)) { image in
                                         image.resizable().scaledToFill()
                                     } placeholder: {
                                         ZStack {
@@ -372,6 +351,8 @@ struct ContentView: View {
                 Text("Your imported videos").font(.title.bold())
                 Text("Imports stay private on this Mac. Publish a video to share it with everyone in Discover.")
                     .foregroundStyle(.secondary)
+                accountPanel
+                if let videoError { Text(videoError).foregroundStyle(.red) }
                 Button { showVideoPicker = true } label: {
                     Label("Import Video", systemImage: "plus")
                 }
@@ -391,7 +372,8 @@ struct ContentView: View {
                                     wallpaperTile(item)
                                     if video.communityID == nil {
                                         Button("Publish to Discover") { videoToPublish = video }
-                                            .disabled(isPublishing)
+                                            .disabled(isPublishing || communityAuth.session == nil)
+                                            .help(communityAuth.session == nil ? "Sign in above to publish" : "Share this video with everyone")
                                     } else {
                                         Label("Published", systemImage: "checkmark.circle.fill")
                                             .foregroundStyle(.secondary)
@@ -401,7 +383,7 @@ struct ContentView: View {
                                         Button("Open Preview") { openDetail(item) }
                                         if video.communityID == nil {
                                             Button("Publish to Discover") { videoToPublish = video }
-                                                .disabled(isPublishing)
+                                                .disabled(isPublishing || communityAuth.session == nil)
                                         }
                                         Button("Remove from Library", role: .destructive) {
                                             videoToDelete = video
@@ -415,6 +397,60 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(24)
+        }
+    }
+
+    private var accountPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let session = communityAuth.session {
+                HStack {
+                    Label("Signed in as \(session.email)", systemImage: "person.crop.circle.fill")
+                    Spacer()
+                    Button("Sign Out") {
+                        communityAuth.signOut()
+                        accountMessage = nil
+                    }
+                }
+            } else {
+                Text("Sign in to publish").font(.headline)
+                HStack {
+                    TextField("Email", text: $accountEmail)
+                        .textContentType(.emailAddress)
+                    SecureField("Password", text: $accountPassword)
+                    Button("Sign In") { authenticate(createAccount: false) }
+                        .buttonStyle(.borderedProminent)
+                    Button("Create Account") { authenticate(createAccount: true) }
+                }
+                .disabled(isAuthenticating)
+                Text("Your imports stay private until you select Publish to Discover.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let accountMessage {
+                Text(accountMessage).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func authenticate(createAccount: Bool) {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true
+        accountMessage = nil
+        Task {
+            do {
+                if createAccount {
+                    let signedIn = try await communityAuth.signUp(email: accountEmail, password: accountPassword)
+                    accountMessage = signedIn ? "Account created and signed in." : "Check your email to confirm your account, then sign in."
+                } else {
+                    try await communityAuth.signIn(email: accountEmail, password: accountPassword)
+                    accountMessage = nil
+                }
+            } catch {
+                accountMessage = error.localizedDescription
+            }
+            accountPassword = ""
+            isAuthenticating = false
         }
     }
 
@@ -442,7 +478,7 @@ struct ContentView: View {
 
     private func detailView(_ item: WallpaperItem) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            Button { detailID = nil } label: { Label("Back to Browse", systemImage: "chevron.left") }
+            Button { detailID = nil } label: { Label("Back to Library", systemImage: "chevron.left") }
                 .buttonStyle(.plain)
             Text(item.name).font(.largeTitle.bold())
             VideoCanvas(player: playback?.previewPlayer, videoSize: playback?.videoSize ?? .zero,
@@ -466,54 +502,6 @@ struct ContentView: View {
         .padding(24)
     }
 
-    private var libraryView: some View {
-        HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("My videos").font(.headline)
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        libraryRow("Sample video", selected: selectedLibraryVideoID.isEmpty) { selectSample() }
-                        ForEach(searchedLibrary) { video in
-                            libraryRow(video.name, selected: selectedLibraryVideoID == video.id.uuidString) {
-                                select(video)
-                            }
-                            .contextMenu {
-                                Button("Remove from Library", role: .destructive) { videoToDelete = video }
-                                    .disabled(appliedVideoID == video.id.uuidString)
-                            }
-                        }
-                    }
-                }
-                if library.isEmpty {
-                    Text("Imported videos will appear here and remain available after you restart the app.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 240, alignment: .leading)
-            VStack(alignment: .leading, spacing: 14) {
-                Text(selectedName).font(.headline).lineLimit(1)
-                VideoCanvas(player: playback?.previewPlayer, videoSize: playback?.videoSize ?? .zero,
-                            videoLayout: videoLayout, isPreview: true)
-                    .frame(height: 290)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .id("\(displayConfiguration)-\(playback?.id.uuidString ?? "none")")
-                Picker("Video layout", selection: $videoLayout) {
-                    ForEach(VideoLayout.allCases) { layout in Text(layout.rawValue).tag(layout) }
-                }
-                Button("Set as Desktop Background") { setDesktopBackground() }
-                    .buttonStyle(.borderedProminent).disabled(playback == nil)
-                Button("Export Still Image…") { exportStillImage() }
-                    if desktopWindow != nil {
-                    Text("Video wallpaper is active on your desktop.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(24)
-    }
-
     private func openDetail(_ item: WallpaperItem) {
         if item.id == "sample" { selectSample() }
         else if let video = library.first(where: { $0.id.uuidString == item.id }) { select(video) }
@@ -523,8 +511,7 @@ struct ContentView: View {
     private func loadCommunity() async {
         do {
             isLoadingCommunity = true
-            communityItems = try await CommunityService.list(server: communityServerAddress,
-                                                             query: searchText)
+            communityItems = try await CommunityService.list(query: searchText)
             communityHasMore = communityItems.count == 50
             communityError = nil
         } catch {
@@ -537,8 +524,7 @@ struct ContentView: View {
         guard !isLoadingMoreCommunity, communityHasMore else { return }
         isLoadingMoreCommunity = true
         do {
-            let next = try await CommunityService.list(server: communityServerAddress,
-                                                        query: searchText, offset: communityItems.count)
+            let next = try await CommunityService.list(query: searchText, offset: communityItems.count)
             communityItems.append(contentsOf: next)
             communityHasMore = next.count == 50
             communityError = nil
@@ -554,8 +540,8 @@ struct ContentView: View {
         Task {
             do {
                 let source = try VideoLibrary.url(for: video)
-                let item = try await CommunityService.publish(server: communityServerAddress,
-                                                              video: video, source: source)
+                let session = try await communityAuth.validSession()
+                let item = try await CommunityService.publish(video: video, source: source, session: session)
                 library = try VideoLibrary.markPublished(video, communityID: item.id,
                                                          existing: library)
                 communityError = nil
@@ -571,18 +557,17 @@ struct ContentView: View {
         guard !isDownloading else { return }
         if let video = library.first(where: { $0.communityID == item.id }) {
             select(video)
-            section = .browse
+            section = .library
             detailID = video.id.uuidString
             return
         }
         isDownloading = true
         Task {
             do {
-                let video = try await CommunityService.download(server: communityServerAddress,
-                                                                wallpaper: item, existing: library)
+                let video = try await CommunityService.download(wallpaper: item, existing: library)
                 library.append(video)
                 select(video)
-                section = .browse
+                section = .library
                 detailID = video.id.uuidString
                 communityError = nil
             } catch {
@@ -608,22 +593,6 @@ struct ContentView: View {
         } catch {
             videoError = "Couldn’t remove \(video.name): \(error.localizedDescription)"
         }
-    }
-
-    private func libraryRow(_ name: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: "film")
-                Text(name).lineLimit(1)
-                Spacer()
-                if selected { Image(systemName: "checkmark") }
-            }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Color.accentColor.opacity(0.18) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
     }
 
     private func loadLibrary() {
@@ -783,16 +752,14 @@ struct ContentView: View {
 
 private enum AppSection: String, CaseIterable, Identifiable {
     case discover = "Discover"
-    case browse = "Browse"
     case submissions = "Submissions"
     case library = "Library"
 
     var id: String { rawValue }
-    var title: String { self == .browse ? "Browse All Backdrops" : rawValue }
+    var title: String { rawValue }
     var icon: String {
         switch self {
         case .discover: "star"
-        case .browse: "square.grid.2x2"
         case .submissions: "cloud"
         case .library: "books.vertical"
         }

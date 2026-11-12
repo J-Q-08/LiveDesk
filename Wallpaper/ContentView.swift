@@ -31,6 +31,9 @@ struct ContentView: View {
     @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
+    @State private var lockScreenBusy = false
+    @State private var lockScreenInstalled = false
+    @State private var previewIsLoading = false
     @AppStorage("selectedLibraryVideoID") private var selectedLibraryVideoID = ""
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
@@ -71,7 +74,16 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 640)
-        .onAppear { loadLibrary() }
+        .onAppear {
+            loadLibrary()
+            lockScreenInstalled = LiveDeskAerialRegistrar.isRegistered
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(
+            for: NSWorkspace.sessionDidResignActiveNotification)) { _ in
+                if lockScreenInstalled {
+                    Task.detached { LiveDeskAerialRegistrar.nudgeRerenderIfActive() }
+                }
+            }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displayConfiguration += 1
             guard let window = desktopWindow, let screen = window.screen ?? NSScreen.main else { return }
@@ -102,8 +114,10 @@ struct ContentView: View {
             }
         }
         .task(id: selectedVideo?.id) {
+            previewIsLoading = true
             guard let url = selectedVideo?.url ?? Bundle.main.url(forResource: "sample", withExtension: "mp4") else {
                 videoError = "Couldn’t find the bundled sample. Import a video to play."
+                previewIsLoading = false
                 return
             }
             do {
@@ -114,9 +128,11 @@ struct ContentView: View {
                 videoError = nil
                 next.previewPlayer.play()
                 previous?.previewPlayer.pause()
+                previewIsLoading = false
             } catch {
                 guard !Task.isCancelled else { return }
                 videoError = "Couldn’t play \(url.lastPathComponent): \(error.localizedDescription)"
+                previewIsLoading = false
             }
         }
     }
@@ -279,8 +295,9 @@ struct ContentView: View {
                 Button("Set as Desktop Background") { setDesktopBackground() }
                     .buttonStyle(.borderedProminent).disabled(playback == nil)
             }
-            Text("macOS does not support third-party video playback on the Lock Screen. Export a still frame to use in Wallpaper settings.")
+            Text("Live Lock Screen uses an experimental macOS integration. Export a still image if you prefer a regular wallpaper.")
                 .font(.caption).foregroundStyle(.secondary)
+            lockScreenControls
             if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
         }
         .padding(24)
@@ -319,6 +336,7 @@ struct ContentView: View {
                 Button("Set as Desktop Background") { setDesktopBackground() }
                     .buttonStyle(.borderedProminent).disabled(playback == nil)
                 Button("Export Still Image…") { exportStillImage() }
+                lockScreenControls
                 if desktopWindow != nil {
                     Text("Video wallpaper is active on your desktop.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -371,17 +389,72 @@ struct ContentView: View {
     }
 
     private func selectSample() {
+        previewIsLoading = true
         selectedLibraryVideoID = ""
         selectedVideo = nil
     }
 
     private func select(_ video: LibraryVideo) {
         do {
+            previewIsLoading = true
             selectedVideo = VideoSelection(url: try VideoLibrary.url(for: video))
             selectedLibraryVideoID = video.id.uuidString
             videoError = nil
         } catch {
+            previewIsLoading = false
             videoError = "Couldn’t open \(video.name): \(error.localizedDescription)"
+        }
+    }
+
+    private var lockScreenControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(lockScreenBusy ? "Preparing Lock Screen…" : "Set as Live Lock Screen") {
+                    installLiveLockScreen()
+                }
+                .disabled(lockScreenBusy || previewIsLoading || playback == nil)
+                if lockScreenInstalled {
+                    Button("Restore Previous Lock Screen") { restoreLockScreen() }
+                        .disabled(lockScreenBusy)
+                }
+            }
+            Text("Experimental: uses macOS's undocumented Aerial wallpaper store and may need repair after a macOS update.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func installLiveLockScreen() {
+        guard let playback, !lockScreenBusy else { return }
+        lockScreenBusy = true
+        let source = playback.sourceURL
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try await LiveDeskAerialRegistrar.installAsScreensaver(videoURL: source)
+                }.value
+                lockScreenInstalled = true
+                videoError = nil
+            } catch {
+                videoError = "Couldn’t set the live Lock Screen: \(error.localizedDescription)"
+            }
+            lockScreenBusy = false
+        }
+    }
+
+    private func restoreLockScreen() {
+        guard !lockScreenBusy else { return }
+        lockScreenBusy = true
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try LiveDeskAerialRegistrar.restorePreviousWallpaper()
+                }.value
+                lockScreenInstalled = false
+                videoError = nil
+            } catch {
+                videoError = "Couldn’t restore the previous Lock Screen: \(error.localizedDescription)"
+            }
+            lockScreenBusy = false
         }
     }
 
@@ -588,10 +661,8 @@ private enum VideoLibrary {
     }
 
     nonisolated static func importVideo(from source: URL, existing: [LibraryVideo]) throws -> LibraryVideo {
-        guard source.startAccessingSecurityScopedResource() else {
-            throw CocoaError(.fileReadNoPermission)
-        }
-        defer { source.stopAccessingSecurityScopedResource() }
+        let hasScopedAccess = source.startAccessingSecurityScopedResource()
+        defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
         let id = UUID()
         let filename = id.uuidString + "." + source.pathExtension.lowercased()
         let destination = try directory.appendingPathComponent(filename)
@@ -752,6 +823,7 @@ private struct VideoSelection {
 
 private final class VideoPlayback {
     let id = UUID()
+    let sourceURL: URL
     let previewPlayer: AVQueuePlayer
     let desktopPlayer: AVQueuePlayer
     let videoSize: CGSize
@@ -759,7 +831,8 @@ private final class VideoPlayback {
     private let desktopLooper: AVPlayerLooper
     private let scopedURL: URL?
 
-    private init(asset: AVURLAsset, videoSize: CGSize, scopedURL: URL?) {
+    private init(asset: AVURLAsset, sourceURL: URL, videoSize: CGSize, scopedURL: URL?) {
+        self.sourceURL = sourceURL
         previewPlayer = AVQueuePlayer()
         desktopPlayer = AVQueuePlayer()
         previewPlayer.isMuted = true
@@ -795,7 +868,7 @@ private final class VideoPlayback {
                 throw PlaybackError.unsupportedVideo
             }
             try Task.checkCancellation()
-            return VideoPlayback(asset: asset, videoSize: videoSize, scopedURL: scopedURL)
+            return VideoPlayback(asset: asset, sourceURL: url, videoSize: videoSize, scopedURL: scopedURL)
         } catch {
             scopedURL?.stopAccessingSecurityScopedResource()
             throw error

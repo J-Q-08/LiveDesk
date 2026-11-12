@@ -9,6 +9,10 @@ import SwiftUI
 
 @main
 struct WallpaperApp: App {
+    init() {
+        LegacyDataMigration.run()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var desktopPlayers: [String: VideoPlayback] = [:]
     @State private var desktopWindows: [String: NSWindow] = [:]
     @State private var desktopGeneration = 0
+    @State private var isDesktopPaused = false
     @State private var desktopTarget: (url: URL, layout: VideoLayout)?
     @State private var loadingDisplays: Set<String> = []
     @State private var showVideoPicker = false
@@ -238,6 +239,25 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
+            if !appliedVideoID.isEmpty {
+                Divider()
+                Button {
+                    setDesktopPaused(!isDesktopPaused)
+                } label: {
+                    Label(isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper",
+                          systemImage: isDesktopPaused ? "play.fill" : "pause.fill")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .disabled(desktopTarget == nil)
+                Button {
+                    stopDesktopWallpaper()
+                } label: {
+                    Label("Stop Wallpaper", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+            }
             Label(connectionStatus.title, systemImage: connectionStatus.icon)
                 .font(.caption)
                 .foregroundStyle(connectionStatus == .connected ? Color.secondary : Color.orange)
@@ -905,9 +925,40 @@ struct ContentView: View {
 
     private func setDesktopBackground(_ item: WallpaperItem) {
         guard let playback, playback.sourceURL == item.url, detailID == item.id else { return }
+        isDesktopPaused = false
         applyDesktopBackground(playback, layout: videoLayout)
         appliedVideoID = item.id
         appliedVideoLayout = videoLayout.rawValue
+    }
+
+    private func setDesktopPaused(_ paused: Bool) {
+        isDesktopPaused = paused
+        for playback in desktopPlayers.values {
+            updateDesktopPlayback(playback)
+        }
+    }
+
+    private func updateDesktopPlayback(_ playback: VideoPlayback) {
+        if isDesktopPaused {
+            playback.desktopPlayer.pause()
+        } else {
+            playback.desktopPlayer.play()
+        }
+    }
+
+    private func stopDesktopWallpaper() {
+        desktopGeneration += 1
+        desktopTarget = nil
+        loadingDisplays.removeAll()
+        setDesktopPaused(true)
+        for window in desktopWindows.values {
+            window.close()
+        }
+        desktopWindows.removeAll()
+        desktopPlayers.removeAll()
+        isDesktopPaused = false
+        appliedVideoID = ""
+        if browseFilter == .active { browseFilter = .all }
     }
 
     private func exportStillImage(from url: URL) {
@@ -955,7 +1006,7 @@ struct ContentView: View {
             view.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
                            layout: layout, isPreview: false)
             desktopPlayers[id] = playback
-            playback.desktopPlayer.play()
+            updateDesktopPlayback(playback)
             if previous !== playback { previous?.desktopPlayer.pause() }
             return
         }
@@ -973,7 +1024,7 @@ struct ContentView: View {
         window.hasShadow = false
         desktopWindows[id] = window
         desktopPlayers[id] = playback
-        playback.desktopPlayer.play()
+        updateDesktopPlayback(playback)
         let iconLevel = CGWindowLevelForKey(.desktopIconWindow)
         window.level = NSWindow.Level(rawValue: Int(iconLevel) - 1)
         window.orderFront(nil)

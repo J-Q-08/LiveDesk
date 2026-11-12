@@ -712,8 +712,9 @@ struct ContentView: View {
                 let currentLibrary = library
                 let fileExtension = url.pathExtension
                 let video = try await Task.detached(priority: .userInitiated) {
-                    try VideoLibrary.importVideo(from: url, extension: fileExtension,
-                                                 title: title, existing: currentLibrary)
+                    try VideoLibrary.validateForUpload(url)
+                    return try VideoLibrary.importVideo(from: url, extension: fileExtension,
+                                                        title: title, existing: currentLibrary)
                 }.value
                 library.append(video)
                 do {

@@ -15,6 +15,33 @@ struct LibraryVideo: Codable, Identifiable, Sendable {
 }
 
 enum VideoLibrary {
+    nonisolated static let maxUploadBytes = 52_428_800
+
+    nonisolated static func validateForUpload(_ source: URL) throws {
+        guard ["mp4", "mov", "m4v"].contains(source.pathExtension.lowercased()) else {
+            throw UploadError.unsupportedFormat
+        }
+        let hasScopedAccess = source.startAccessingSecurityScopedResource()
+        defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
+        let size = try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber
+        guard let size else { throw UploadError.unreadableFile }
+        guard size.intValue > 0 else { throw UploadError.emptyFile }
+        guard size.intValue <= maxUploadBytes else { throw UploadError.tooLarge }
+    }
+
+    private enum UploadError: LocalizedError {
+        case unsupportedFormat, unreadableFile, emptyFile, tooLarge
+
+        var errorDescription: String? {
+            switch self {
+            case .unsupportedFormat: "Choose an MP4, MOV, or M4V video."
+            case .unreadableFile: "Couldn’t read the selected video."
+            case .emptyFile: "The selected video is empty."
+            case .tooLarge: "This video exceeds the 50 MB community upload limit."
+            }
+        }
+    }
+
     nonisolated private static var directory: URL {
         get throws {
             let support = try FileManager.default.url(for: .applicationSupportDirectory,

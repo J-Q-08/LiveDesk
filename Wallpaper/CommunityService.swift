@@ -58,7 +58,7 @@ enum CommunityService {
         guard ["mp4", "mov", "m4v"].contains(fileExtension) else { throw CommunityError.unsupportedVideo }
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
         let fileSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
-        guard fileSize <= 52_428_800 else { throw CommunityError.tooLarge }
+        guard fileSize <= VideoLibrary.maxUploadBytes else { throw CommunityError.tooLarge }
         // A local video keeps the same remote identity across retries.
         let id = video.id.uuidString.lowercased()
         let path = "\(session.userID)/\(id).\(fileExtension)"

@@ -39,7 +39,8 @@ struct ContentView: View {
     @State private var communityRequestID: UUID?
     @State private var myCloudItems: [CommunityWallpaper] = []
     @State private var cloudError: String?
-    @State private var isLoadingCloud = false
+    @State private var cloudOwnerID: String?
+    @State private var cloudRequestID: UUID?
     @State private var connectionStatus: ConnectionStatus = .checking
     @State private var communityError: String?
     @State private var isLoadingCommunity = false
@@ -79,7 +80,7 @@ struct ContentView: View {
 
     private var libraryItems: [WallpaperItem] {
         let items = allItems.filter { item in
-            (searchText.isEmpty || item.name.localizedCaseInsensitiveContains(searchText)) &&
+            matchesSearch(item.name) &&
             (browseFilter == .all ||
              (browseFilter == .imports && item.id != "sample") ||
              (browseFilter == .sample && item.id == "sample") ||
@@ -88,8 +89,19 @@ struct ContentView: View {
         return sortByName ? items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending } : items
     }
 
-    private var searchedLibrary: [LibraryVideo] {
-        library.filter { searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText) }
+    private var pendingUploads: [LibraryVideo] {
+        library.filter { $0.communityID == nil }
+    }
+
+    private var searchedCloudUploads: [CommunityWallpaper] {
+        guard cloudOwnerID == communityAuth.session?.userID else { return [] }
+        return myCloudItems.filter { matchesSearch($0.title) }
+    }
+
+    private var isLoadingCloud: Bool { cloudRequestID != nil }
+
+    private func matchesSearch(_ title: String) -> Bool {
+        searchText.isEmpty || title.localizedCaseInsensitiveContains(searchText)
     }
 
     var body: some View {
@@ -225,6 +237,8 @@ struct ContentView: View {
         }
         .task(id: communityAuth.session?.userID) {
             guard let userID = communityAuth.session?.userID else {
+                cloudRequestID = nil
+                cloudOwnerID = nil
                 myCloudItems = []
                 cloudError = nil
                 return
@@ -478,7 +492,9 @@ struct ContentView: View {
                     }
                 }
                 if let videoError { Text(videoError).foregroundStyle(.red) }
-                if let cloudError { Text(cloudError).foregroundStyle(.orange) }
+                if let cloudError, cloudOwnerID == communityAuth.session?.userID {
+                    Text(cloudError).foregroundStyle(.orange)
+                }
                 Button { confirmingPublicImport = true } label: {
                     Label(isImporting ? "Uploading…" : "Upload and Share Video", systemImage: "square.and.arrow.up")
                 }
@@ -494,38 +510,33 @@ struct ContentView: View {
                                 Task { await loadMyCloud(userID: userID) }
                             }
                         }
+                        .disabled(isLoadingCloud)
                     }
-                    if myCloudItems.isEmpty && !isLoadingCloud && cloudError == nil {
-                        Text("No videos uploaded to Supabase yet.")
+                    if searchedCloudUploads.isEmpty && !isLoadingCloud && cloudError == nil {
+                        Text(myCloudItems.isEmpty ? "No cloud uploads yet." : "No cloud uploads match your search.")
                             .foregroundStyle(.secondary)
+                    } else if !searchedCloudUploads.isEmpty {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16, alignment: .top)], spacing: 16) {
+                            ForEach(searchedCloudUploads) { item in communityTile(item) }
+                        }
+                        Text("Select a cloud upload to open or download it to this Mac.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if !pendingUploads.isEmpty {
+                    Text("Waiting to share").font(.headline)
+                    let matchingPending = pendingUploads.filter { matchesSearch($0.name) }
+                    if matchingPending.isEmpty {
+                        Text("No pending uploads match your search.").foregroundStyle(.secondary)
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16, alignment: .top)], spacing: 16) {
-                            ForEach(myCloudItems) { item in communityTile(item) }
-                        }
-                    }
-                    Text("Cloud uploads are available from any Mac. Select one to download a local copy.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Text("On this Mac").font(.headline)
-                if searchedLibrary.isEmpty {
-                    ContentUnavailableView("No uploads yet", systemImage: "film.stack",
-                                           description: Text(library.isEmpty
-                                                             ? "Sign in and upload a video to share it."
-                                                             : "No uploads match your search."))
-                        .frame(maxWidth: .infinity, minHeight: 300)
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16, alignment: .top)], spacing: 16) {
-                        ForEach(searchedLibrary) { video in
-                            if let item = allItems.first(where: { $0.id == video.id.uuidString }) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    wallpaperTile(item)
-                                    if video.communityID == nil {
+                            ForEach(matchingPending) { video in
+                                if let item = allItems.first(where: { $0.id == video.id.uuidString }) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        wallpaperTile(item)
                                         Button("Retry Sharing") { publish(video) }
                                             .disabled(isImporting || isPublishing || communityAuth.session == nil)
                                             .help(communityAuth.session == nil ? "Sign in to retry sharing" : "Upload this local copy to Discover")
-                                    } else {
-                                        Label("Published", systemImage: "checkmark.circle.fill")
-                                            .foregroundStyle(.secondary)
                                     }
                                 }
                             }
@@ -811,23 +822,34 @@ struct ContentView: View {
     }
 
     private func loadMyCloud(userID: String) async {
-        guard !isLoadingCloud else { return }
-        isLoadingCloud = true
-        defer { isLoadingCloud = false }
+        guard communityAuth.session?.userID == userID, !Task.isCancelled else { return }
+        if cloudOwnerID != userID {
+            myCloudItems = []
+            cloudError = nil
+            cloudOwnerID = userID
+        }
+        let requestID = UUID()
+        cloudRequestID = requestID
+        defer {
+            if cloudRequestID == requestID { cloudRequestID = nil }
+        }
         do {
             var found: [CommunityWallpaper] = []
             while true {
                 let page = try await CommunityService.list(offset: found.count, ownerID: userID)
                 found.append(contentsOf: page)
                 if page.count < 50 { break }
+                guard cloudRequestID == requestID else { return }
                 try Task.checkCancellation()
             }
-            guard communityAuth.session?.userID == userID else { return }
+            guard !Task.isCancelled, cloudRequestID == requestID,
+                  communityAuth.session?.userID == userID else { return }
             myCloudItems = found
             cloudError = nil
             connectionStatus = .connected
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, cloudRequestID == requestID,
+                  communityAuth.session?.userID == userID else { return }
             cloudError = "Couldn’t load your cloud uploads: \(error.localizedDescription)"
             connectionStatus = connectionStatus(for: error)
         }

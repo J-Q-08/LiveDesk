@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var videoLayout: VideoLayout = .fill
     @State private var displayConfiguration = 0
     @State private var section: AppSection = .discover
+    @State private var browseAllCommunity = false
     @State private var detailID: String?
     @State private var searches: [AppSection: String] = [:]
     @State private var isGrid = true
@@ -107,54 +108,53 @@ struct ContentView: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            sidebar
-            VStack(spacing: 0) {
-                toolbar
-                if let downloadingTitle {
-                    ProgressView("Downloading \(downloadingTitle)…")
-                        .controlSize(.small)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                sidebar
+                Divider()
+                VStack(spacing: 0) {
+                    toolbar
+                    if let downloadingTitle {
+                        ProgressView("Downloading \(downloadingTitle)…")
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 8)
+                    }
+                    if let downloadError {
+                        HStack {
+                            Label(downloadError, systemImage: "exclamationmark.circle")
+                            Spacer()
+                            Button("Dismiss") { self.downloadError = nil }
+                        }
+                        .foregroundStyle(.red)
                         .padding(.horizontal, 24)
                         .padding(.vertical, 8)
-                }
-                if let downloadError {
-                    HStack {
-                        Label(downloadError, systemImage: "exclamationmark.circle")
-                        Spacer()
-                        Button("Dismiss") { self.downloadError = nil }
                     }
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 8)
-                }
-                if let libraryError {
-                    HStack {
-                        Label(libraryError, systemImage: "exclamationmark.circle")
-                        Spacer()
-                        Button("Dismiss") { self.libraryError = nil }
+                    if let libraryError {
+                        HStack {
+                            Label(libraryError, systemImage: "exclamationmark.circle")
+                            Spacer()
+                            Button("Dismiss") { self.libraryError = nil }
+                        }
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 8)
                     }
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 8)
-                }
-                Group {
-                    if let detailID, let item = allItems.first(where: { $0.id == detailID }) {
-                        detailView(item)
-                    } else {
-                        sectionView
+                    Group {
+                        if let detailID, let item = allItems.first(where: { $0.id == detailID }) {
+                            detailView(item)
+                        } else {
+                            sectionView
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .clipped()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .clipped()
-                if !desktop.appliedVideoID.isEmpty { playbackBar }
             }
+            if !desktop.appliedVideoID.isEmpty { playbackBar }
         }
-        .padding(12)
-        .background {
-            LinearGradient(colors: [Color(red: 0.09, green: 0.13, blue: 0.23), GalleryStyle.background],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        .background(GalleryStyle.background)
         .preferredColorScheme(.dark)
         .tint(GalleryStyle.accent)
         .frame(minWidth: 980, minHeight: 640)
@@ -276,32 +276,28 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(nsImage: NSApplication.shared.applicationIconImage)
-                    .resizable().scaledToFit().frame(width: 38, height: 38)
-                    .accessibilityHidden(true)
-                Text("LiveDesk").font(.system(size: 20, weight: .semibold)).tracking(-0.55)
+        VStack(alignment: .leading, spacing: 5) {
+            if section != .account {
+                sidebarSearch
+                    .padding(.bottom, 14)
             }
-            .padding(.bottom, 20)
-            ForEach(AppSection.allCases) { item in
-                Button {
-                    section = item
-                    detailID = nil
-                } label: {
-                    Label(item.rawValue, systemImage: item.icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(section == item ? GalleryStyle.accent : .secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12).padding(.vertical, 12)
-                        .background(section == item ? GalleryStyle.accent.opacity(0.13) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 10))
-                        .contentShape(RoundedRectangle(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(section == item ? .isSelected : [])
+            Text("Discover")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.leading, 9)
+            sidebarRow("Featured", icon: "book", selected: section == .discover && !browseAllCommunity) {
+                showDiscover(browseAll: false)
+            }
+            sidebarRow("Browse All", icon: "square.grid.2x2", selected: section == .discover && browseAllCommunity) {
+                showDiscover(browseAll: true)
             }
             Spacer()
+            ForEach([AppSection.library, .upload, .account]) { item in
+                sidebarRow(item.rawValue, icon: item.icon, selected: section == item) {
+                    section = item
+                    detailID = nil
+                }
+            }
+            Divider().padding(.vertical, 4)
             if let error = desktop.error {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
@@ -319,13 +315,67 @@ struct ContentView: View {
                 Text(loginItemMessage).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(14)
-        .frame(width: 188)
-        .background(GalleryStyle.sidebar, in: RoundedRectangle(cornerRadius: 18))
-        .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(GalleryStyle.border) }
+        .padding(.horizontal, 10).padding(.vertical, 12)
+        .frame(width: 200)
+        .background {
+            LinearGradient(colors: [GalleryStyle.railTop, GalleryStyle.sidebar, GalleryStyle.railBottom],
+                           startPoint: .top, endPoint: .bottom)
+        }
+    }
+
+    private var sidebarSearch: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+            TextField("Search \(section.rawValue)", text: searchBinding)
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button { searches[section] = "" } label: {
+                    Image(systemName: "xmark.circle.fill").frame(width: 22, height: 25)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 29)
+        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func sidebarRow(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .foregroundStyle(selected ? .white : GalleryStyle.accent)
+                    .frame(width: 19)
+                Text(title)
+            }
+            .font(.system(size: 13, weight: selected ? .semibold : .medium))
+            .foregroundStyle(selected ? .white : Color.white.opacity(0.85))
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .padding(.horizontal, 8)
+            .background(selected ? GalleryStyle.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func showDiscover(browseAll: Bool) {
+        section = .discover
+        detailID = nil
+        browseAllCommunity = browseAll
+        searches[.discover] = ""
     }
 
     private var toolbar: some View {
+        Group {
+            if section == .discover { discoverTabs }
+            else { sectionToolbar }
+        }
+    }
+
+    private var sectionToolbar: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(detailID == nil ? section.title : "Wallpaper Preview")
@@ -336,22 +386,6 @@ struct ContentView: View {
                 }
             }
             Spacer()
-            if section == .discover && detailID == nil {
-                Button {
-                    Task { await loadCommunity() }
-                } label: {
-                    Group {
-                        if isLoadingCommunity { ProgressView().controlSize(.small) }
-                        else { Image(systemName: "arrow.clockwise") }
-                    }
-                    .frame(width: 34, height: 34).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 9))
-                .accessibilityLabel("Refresh Discover")
-                .help("Refresh Discover")
-                .disabled(isLoadingCommunity)
-            }
             if section == .library && detailID == nil {
                 HStack(spacing: 2) {
                     Button { isGrid = true } label: { layoutIcon("square.grid.2x2", selected: isGrid) }
@@ -385,31 +419,65 @@ struct ContentView: View {
                 .padding(2)
                 .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 9))
             }
-            if detailID == nil && section != .account {
-                HStack(spacing: 4) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search \(section.rawValue)", text: searchBinding)
-                        .textFieldStyle(.plain)
-                    if !searchText.isEmpty {
-                        Button { searches[section] = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .frame(width: 24, height: 24)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear search")
-                    }
-                }
-                .padding(.leading, 9)
-                .padding(.trailing, 4)
-                .frame(height: 34)
-                .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 9))
-                .frame(width: 190)
-            }
         }
         .padding(.horizontal, 24)
         .padding(.top, 13)
         .padding(.bottom, 16)
+    }
+
+    private var discoverTabs: some View {
+        HStack(spacing: 10) {
+            tabButton(browseAllCommunity ? "Browse All" : "Featured", icon: "sparkles", selected: detailID == nil) {
+                detailID = nil
+            }
+            ForEach(previewTabs) { item in
+                tabButton(item.name, icon: "doc", selected: detailID == item.id) { openDetail(item) }
+            }
+            Spacer(minLength: 0)
+            if detailID == nil {
+                Button {
+                    Task { await loadCommunity() }
+                } label: {
+                    Group {
+                        if isLoadingCommunity { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.clockwise") }
+                    }
+                    .frame(width: 32, height: 30).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Refresh Discover")
+                .help("Refresh Discover")
+                .disabled(isLoadingCommunity)
+            }
+        }
+        .padding(.horizontal, 12).frame(height: 48)
+        .background(GalleryStyle.tabBar)
+        .overlay(alignment: .bottom) { Divider().allowsHitTesting(false) }
+    }
+
+    private var previewTabs: [WallpaperItem] {
+        let items = allItems
+        let tabs = Array(items.prefix(3))
+        if let detailID, !tabs.contains(where: { $0.id == detailID }),
+           let active = items.first(where: { $0.id == detailID }) {
+            return Array(tabs.prefix(2)) + [active]
+        }
+        return tabs
+    }
+
+    private func tabButton(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                .lineLimit(1)
+                .frame(maxWidth: 136, alignment: .leading)
+                .padding(.horizontal, 10).frame(height: 28)
+                .background(.white.opacity(selected ? 0.23 : 0.08), in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(title)
     }
 
     private func layoutIcon(_ symbol: String, selected: Bool) -> some View {
@@ -455,13 +523,9 @@ struct ContentView: View {
             .help("Stop Wallpaper")
         }
         .buttonStyle(.plain)
-        .padding(9)
-        .frame(maxWidth: 530)
-        .background(GalleryStyle.sidebar, in: RoundedRectangle(cornerRadius: 14))
-        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 6)
-        .padding(.bottom, 2)
+        .padding(.horizontal, 16).padding(.vertical, 7)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider().allowsHitTesting(false) }
     }
 
     @ViewBuilder private var sectionView: some View {
@@ -512,56 +576,147 @@ struct ContentView: View {
     private var discoverView: some View {
         GeometryReader { geometry in
             let columnCount = max(1, Int((max(1, geometry.size.width - 48) + 16) / (220 + 16)))
+            let featured = !browseAllCommunity && searchText.isEmpty ? communityItems.first : nil
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    if let communityError, communityItems.isEmpty, !isLoadingCommunity {
-                        ContentUnavailableView {
-                            Label("Discover is unavailable", systemImage: "wifi.exclamationmark")
-                        } description: {
-                            Text(communityError)
-                        } actions: {
-                            Button("Open Library") { section = .library }
+                if let featured {
+                    VStack(alignment: .leading, spacing: 22) {
+                        let height = min(geometry.size.width * 0.53, max(320, geometry.size.height * 0.61))
+                        featuredWallpaper(featured, height: height)
+                        if let communityError {
+                            Text(communityError).foregroundStyle(.secondary).padding(.horizontal, 28)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 300)
-                    } else if communityItems.isEmpty && !isLoadingCommunity {
-                        ContentUnavailableView(searchText.isEmpty ? "No shared wallpapers yet" : "No matching wallpapers",
-                                               systemImage: searchText.isEmpty ? "globe" : "magnifyingglass",
-                                               description: Text(searchText.isEmpty
-                                                                 ? "Upload a video to make it appear here."
-                                                                 : "Try another search term."))
+                        if communityItems.count > 1 {
+                            discoverShelf("More community wallpapers", seeAll: { showDiscover(browseAll: true) }) {
+                                ForEach(Array(communityItems.dropFirst().prefix(8))) { item in
+                                    communityTile(item).fixedSize(horizontal: false, vertical: true).frame(width: 208)
+                                }
+                            }
+                        }
+                        if !allItems.isEmpty {
+                            discoverShelf("From your Library", seeAll: { section = .library }) {
+                                ForEach(Array(allItems.prefix(8))) { item in
+                                    wallpaperTile(item).fixedSize(horizontal: false, vertical: true).frame(width: 208)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.bottom, 24)
+                } else {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if let communityError, communityItems.isEmpty, !isLoadingCommunity {
+                            ContentUnavailableView {
+                                Label("Discover is unavailable", systemImage: "wifi.exclamationmark")
+                            } description: {
+                                Text(communityError)
+                            } actions: {
+                                Button("Open Library") { section = .library }
+                            }
                             .frame(maxWidth: .infinity, minHeight: 300)
-                    } else {
-                        if let communityError, !communityItems.isEmpty {
-                            Text(communityError).foregroundStyle(.secondary)
-                        }
-                        if communityItems.count == 1, searchText.isEmpty, let item = communityItems.first {
-                            communityTile(item, prominent: true).frame(maxWidth: 760)
+                        } else if communityItems.isEmpty && !isLoadingCommunity {
+                            ContentUnavailableView(searchText.isEmpty ? "No shared wallpapers yet" : "No matching wallpapers",
+                                                   systemImage: searchText.isEmpty ? "globe" : "magnifyingglass",
+                                                   description: Text(searchText.isEmpty
+                                                                     ? "Upload a video to make it appear here."
+                                                                     : "Try another search term."))
+                                .frame(maxWidth: .infinity, minHeight: 300)
                         } else {
+                            if let communityError, !communityItems.isEmpty {
+                                Text(communityError).foregroundStyle(.secondary)
+                            }
+                            if !communityItems.isEmpty {
+                                Text(searchText.isEmpty ? "Browse All" : "Search results")
+                                    .font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                            }
                             MasonryColumns(items: communityItems, columnCount: columnCount) { item in
                                 communityTile(item)
                             }
-                        }
-                        if communityHasMore {
-                            Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
-                                Task { await loadMoreCommunity() }
+                            if communityHasMore {
+                                Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
+                                    Task { await loadMoreCommunity() }
+                                }
+                                .disabled(isLoadingCommunity || isLoadingMoreCommunity)
+                                .frame(maxWidth: .infinity)
                             }
-                            .disabled(isLoadingCommunity || isLoadingMoreCommunity)
-                            .frame(maxWidth: .infinity)
                         }
-                    }
                 }
-                .padding(.horizontal, 24).padding(.bottom, 20)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
 
-    private func communityTile(_ item: CommunityWallpaper, prominent: Bool = false) -> some View {
-        let isLocal = library.contains { $0.communityID == item.id && (try? VideoLibrary.url(for: $0)) != nil }
+    private func featuredWallpaper(_ item: CommunityWallpaper, height: CGFloat) -> some View {
+        let isLocal = hasLocalCopy(of: item)
+        return CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath), fillsFrame: true)
+            .frame(height: height)
+            .accessibilityHidden(true)
+            .overlay {
+                LinearGradient(stops: [.init(color: .black.opacity(0.66), location: 0),
+                                       .init(color: .clear, location: 0.51),
+                                       .init(color: .black.opacity(0.63), location: 1)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .topLeading) {
+                Text(item.title)
+                    .font(.system(size: 42, weight: .bold)).tracking(-1.4)
+                    .lineLimit(2)
+                    .shadow(color: .black.opacity(0.5), radius: 9, y: 2)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.horizontal, 34).padding(.top, 32)
+            }
+            .overlay(alignment: .bottomLeading) {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Featured wallpaper").font(.subheadline.weight(.semibold))
+                        Text(isLocal ? "Saved in your Library" : "Available from the community")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Button { download(item) } label: {
+                        Label(isLocal ? "Open in Library" : "Download", systemImage: isLocal ? "arrow.up.right" : "arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(downloadingTitle != nil)
+                }
+                .padding(16).frame(width: 370)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15))
+                .overlay { RoundedRectangle(cornerRadius: 15).strokeBorder(.white.opacity(0.16)).allowsHitTesting(false) }
+                .padding(.leading, 28).padding(.bottom, 24)
+            }
+            .clipped()
+    }
+
+    private func discoverShelf<Cards: View>(_ title: String, seeAll: @escaping () -> Void,
+                                             @ViewBuilder cards: () -> Cards) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Divider().padding(.horizontal, 28)
+            HStack {
+                Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button("See All", action: seeAll)
+                    .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
+                    .accessibilityLabel("See all \(title.lowercased())")
+            }
+            .padding(.horizontal, 28)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 14) { cards() }
+                    .padding(.horizontal, 28).padding(.bottom, 8)
+            }
+        }
+    }
+
+    private func hasLocalCopy(of item: CommunityWallpaper) -> Bool {
+        library.contains { $0.communityID == item.id && (try? VideoLibrary.url(for: $0)) != nil }
+    }
+
+    private func communityTile(_ item: CommunityWallpaper) -> some View {
+        let isLocal = hasLocalCopy(of: item)
         let action = isLocal ? "Open in Library" : "Download to Library"
         return Button { download(item) } label: {
             GalleryTile(title: item.title, symbol: isLocal ? "arrow.up.right" : "arrow.down",
-                        subtitle: prominent ? action : nil, prominent: prominent) {
+                        subtitle: nil, prominent: false) {
                 CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
             }
         }
@@ -862,6 +1017,7 @@ struct ContentView: View {
     }
 
     private func openDetail(id: String) {
+        guard detailID != id else { return }
         playback?.previewPlayer.pause()
         playback = nil
         previewError = nil
@@ -1239,8 +1395,12 @@ private enum AppSection: String, CaseIterable, Identifiable {
 }
 
 private enum GalleryStyle {
-    static let background = Color(red: 0.037, green: 0.046, blue: 0.069)
-    static let sidebar = Color(red: 0.065, green: 0.083, blue: 0.125)
+    static let background = Color(red: 0.093, green: 0.105, blue: 0.126)
+    static let railTop = Color(red: 0.16, green: 0.25, blue: 0.34)
+    static let sidebar = Color(red: 0.10, green: 0.16, blue: 0.22)
+    static let railBottom = Color(red: 0.067, green: 0.105, blue: 0.15)
+    static let tabBar = Color(red: 0.16, green: 0.20, blue: 0.23)
+    static let selection = Color(red: 0.02, green: 0.38, blue: 0.73)
     static let surface = Color(red: 0.105, green: 0.132, blue: 0.187)
     static let accent = Color(red: 0.41, green: 0.73, blue: 1)
     static let border = Color.white.opacity(0.09)
@@ -1338,13 +1498,32 @@ private struct VideoThumbnail: View {
 
 private struct CommunityThumbnail: View {
     let url: URL?
+    var fillsFrame = false
     @State private var image: NSImage?
     @State private var aspectRatio: CGFloat = 16.0 / 9.0
 
     var body: some View {
+        Group {
+            if fillsFrame { artwork }
+            else { artwork.aspectRatio(aspectRatio, contentMode: .fit) }
+        }
+        .task(id: url) {
+            image = nil
+            aspectRatio = 16.0 / 9.0
+            guard let url,
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  !Task.isCancelled,
+                  let image = NSImage(data: data),
+                  image.size.width > 0, image.size.height > 0 else { return }
+            self.image = image
+            aspectRatio = image.size.width / image.size.height
+        }
+    }
+
+    private var artwork: some View {
         GeometryReader { geometry in
             ZStack {
-                Color.black
+                GalleryStyle.sidebar
                 if let image {
                     Image(nsImage: image).resizable().scaledToFill()
                 } else {
@@ -1353,15 +1532,6 @@ private struct CommunityThumbnail: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
-        }
-        .aspectRatio(aspectRatio, contentMode: .fit)
-        .task(id: url) {
-            guard let url,
-                  let (data, _) = try? await URLSession.shared.data(from: url),
-                  let image = NSImage(data: data),
-                  image.size.width > 0, image.size.height > 0 else { return }
-            self.image = image
-            aspectRatio = image.size.width / image.size.height
         }
     }
 }

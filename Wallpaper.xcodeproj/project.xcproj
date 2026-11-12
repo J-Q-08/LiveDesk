@@ -11,12 +11,15 @@
     ],
   },
   "files": [
+    { "kind": "folder", "path": "WallpaperRefresh", "target-membership": [ "WallpaperRefresh" ] },
+    { "kind": "folder", "path": "Shared", "target-membership": [ "Wallpaper", "WallpaperRefresh" ] },
     { "kind": "folder", "path": "Wallpaper", "target-membership": [ "Wallpaper" ] },
     {
       "kind": "group",
       "name": "Products",
       "children": [
         { "path": "<PRODUCTS>/Wallpaper.app", "id": "8CF88D8E309C643A00E5523D", "type": "wrapper.application", "index": false },
+        { "path": "<PRODUCTS>/WallpaperRefresh.app", "id": "40CADA020000000000000003", "type": "wrapper.application", "index": false, "target-membership": [ { "build-phase": "Wallpaper/copy/Embed Wallpaper Helper", "code-sign-on-copy": true, "header-preservation": "remove-on-copy" } ] },
       ],
     },
   ],
@@ -26,10 +29,19 @@
       "id": "8CF88D8D309C643A00E5523D",
       "product": "Products/Wallpaper.app",
       "product-type": "application",
+      "dependencies": [
+        "WallpaperRefresh",
+      ],
       "build-phases": [
         "compile-sources",
         "frameworks",
         "resources",
+        {
+          "kind": "copy",
+          "name": "Embed Wallpaper Helper",
+          "bundle-base-path": "root",
+          "relative-path": "Contents/Helpers",
+        },
       ],
       "build-settings": {
         "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
@@ -57,6 +69,27 @@
         "SWIFT_DEFAULT_ACTOR_ISOLATION": "MainActor",
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY": "YES",
+        "SWIFT_VERSION": "5.0",
+      },
+    }, {
+      "name": "WallpaperRefresh",
+      "id": "40CADA02000000000000000A",
+      "product": "Products/WallpaperRefresh.app",
+      "product-type": "application",
+      "build-phases": [
+        "compile-sources",
+        "frameworks",
+        "resources",
+      ],
+      "build-settings": {
+        "CODE_SIGN_STYLE": "Automatic",
+        "CURRENT_PROJECT_VERSION": "1",
+        "ENABLE_APP_SANDBOX": "NO",
+        "GENERATE_INFOPLIST_FILE": "YES",
+        "INFOPLIST_KEY_LSUIElement": "YES",
+        "MARKETING_VERSION": "1.0",
+        "PRODUCT_BUNDLE_IDENTIFIER": "com.jeffrey.Wallpaper.WallpaperRefresh",
+        "PRODUCT_NAME": "WallpaperRefresh",
         "SWIFT_VERSION": "5.0",
       },
     },

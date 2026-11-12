@@ -36,7 +36,6 @@ private final class AerialWriterPipeline: @unchecked Sendable {
 
 /// Registers videos in the private per-user Aerial catalog used by macOS Wallpaper.
 enum LiveDeskAerialRegistrar {
-    nonisolated private static let categoryID = "1DA60D58-7B3F-4A52-A441-879D57DD0001"
     nonisolated private static let subcategoryID = "1DA60D58-7B3F-4A52-A441-879D57DD0002"
     @MainActor private static var isInstalling = false
 
@@ -130,7 +129,7 @@ enum LiveDeskAerialRegistrar {
         }
     }
 
-    @MainActor static func install(videoURL: URL, title: String, libraryID: String, in store: URL) async throws {
+    @MainActor static func install(videoURL: URL, title: String, libraryID: String, in store: URL) async throws -> String {
         guard !isInstalling else { throw RegistrarError.installInProgress }
         isInstalling = true
         defer { isInstalling = false }
@@ -147,13 +146,13 @@ enum LiveDeskAerialRegistrar {
               let assets = catalog["assets"] as? [[String: Any]] else {
             throw RegistrarError.manifestNotFound
         }
-        if assets.contains(where: { asset in
+        if let registered = assets.first(where: { asset in
             guard asset["liveDeskLibraryID"] as? String == libraryID,
                   asset["localizedNameKey"] as? String == title,
                   let id = asset["id"] as? String, UUID(uuidString: id) != nil else { return false }
             return files.isReadableFile(atPath: aerials.appendingPathComponent("videos/\(id).mov").path) &&
                 files.isReadableFile(atPath: aerials.appendingPathComponent("thumbnails/\(id).png").path)
-        }) { return }
+        }), let id = registered["id"] as? String { return id }
 
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: videoURL))
         generator.appliesPreferredTrackTransform = true
@@ -193,10 +192,10 @@ enum LiveDeskAerialRegistrar {
             ]
             var category = group
             var subcategory = group
-            category["id"] = categoryID
+            category["id"] = AerialSelection.categoryID
             subcategory["id"] = subcategoryID
             category["subcategories"] = [subcategory]
-            categories.removeAll { $0["id"] as? String == categoryID }
+            categories.removeAll { $0["id"] as? String == AerialSelection.categoryID }
             categories.append(category)
 
             // Retain earlier registrations so an existing macOS selection still resolves.
@@ -208,7 +207,7 @@ enum LiveDeskAerialRegistrar {
                 "accessibilityLabel": title,
                 "previewImage": preview.absoluteString,
                 "url-4K-SDR-240FPS": video.absoluteString,
-                "categories": [categoryID],
+                "categories": [AerialSelection.categoryID],
                 "subcategories": [subcategoryID],
                 "includeInShuffle": false,
                 "showInTopLevel": true,
@@ -219,6 +218,7 @@ enum LiveDeskAerialRegistrar {
             catalog["assets"] = assets
             try JSONSerialization.data(withJSONObject: catalog, options: [.prettyPrinted])
                 .write(to: manifest, options: .atomic)
+            return assetID
         } catch {
             try? files.removeItem(at: video)
             try? files.removeItem(at: preview)

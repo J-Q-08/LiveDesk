@@ -59,8 +59,9 @@ struct ContentView: View {
     @State private var loginError: String?
     @State private var previewError: String?
     @State private var isPreparingLockScreen = false
-    @State private var preparedLockScreen: WallpaperItem?
-    @State private var showLockScreenInstructions = false
+    @MainActor private static var isApplyingLockScreen = false
+    @State private var lockScreenVideoID: String?
+    @AppStorage("lockScreenFolderBookmark") private var lockScreenFolderBookmark: Data?
     @StateObject private var communityAuth = CommunityAuth.shared
     @State private var accountEmail = ""
     @State private var accountPassword = ""
@@ -215,17 +216,6 @@ struct ContentView: View {
             }
             .padding(24)
             .frame(width: 460)
-        }
-        .alert("Choose your live Lock Screen", isPresented: $showLockScreenInstructions,
-               presenting: preparedLockScreen) { _ in
-            Button("Open Wallpaper Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            Button("Done", role: .cancel) {}
-        } message: { item in
-            Text("In Wallpaper settings, choose \(item.name) under LiveDesk. If Wallpaper settings were already open, quit System Settings and reopen it to refresh the list.")
         }
         .alert("Rename Local Copy", isPresented: Binding(
             get: { videoToRename != nil },
@@ -988,11 +978,15 @@ struct ContentView: View {
                     Button("Set as Desktop Background") { setDesktopBackground(item) }
                         .buttonStyle(GlassActionStyle()).disabled(currentPlayback == nil)
                     if section == .library {
-                        Button(isPreparingLockScreen ? "Preparing Lock Screen…" : "Set as Live Lock Screen…") {
-                            prepareLockScreen(item)
+                        Button(isPreparingLockScreen ? "Setting Lock Screen…" : "Set as Live Lock Screen") {
+                            setLockScreen(item)
                         }
                         .buttonStyle(GlassActionStyle())
                         .disabled(currentPlayback == nil || isPreparingLockScreen)
+                        if lockScreenVideoID == item.id {
+                            Label("Lock Screen updated", systemImage: "checkmark.circle")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
                     }
                     Button("Export Still Image…") { exportStillImage(from: item.url) }
                         .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
@@ -1284,39 +1278,103 @@ struct ContentView: View {
         desktop.apply(playback, id: item.id, layout: videoLayout)
     }
 
-    private func prepareLockScreen(_ item: WallpaperItem) {
+    private func setLockScreen(_ item: WallpaperItem) {
         guard !isPreparingLockScreen, playback?.sourceURL == item.url, detailID == item.id else { return }
         guard #available(macOS 26.0, *), let home = Self.userHomeDirectory else {
             videoError = "Live Lock Screen requires macOS Tahoe or later."
             return
         }
+        guard !Self.isApplyingLockScreen else {
+            videoError = "LiveDesk is already setting a Lock Screen wallpaper."
+            return
+        }
 
-        let store = home.appendingPathComponent("Library/Application Support/com.apple.wallpaper",
-                                               isDirectory: true)
+        Self.isApplyingLockScreen = true
+        isPreparingLockScreen = true
+        videoError = nil
+        Task {
+            defer {
+                Self.isApplyingLockScreen = false
+                isPreparingLockScreen = false
+            }
+            do {
+                let store = home.appendingPathComponent("Library/Application Support/com.apple.wallpaper",
+                                                        isDirectory: true)
+                guard let (folder, startedAccess) = try await openLockScreenStore(at: store) else { return }
+                defer { if startedAccess { folder.stopAccessingSecurityScopedResource() } }
+                let assetID = try await LiveDeskAerialRegistrar.install(
+                    videoURL: item.url, title: item.name, libraryID: item.id, in: folder)
+                try await applyAerial(assetID, in: folder)
+                lockScreenVideoID = item.id
+            } catch {
+                videoError = "Couldn’t set the live Lock Screen. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func openLockScreenStore(at store: URL) async throws -> (URL, Bool)? {
+        let storePath = store.resolvingSymlinksInPath().standardizedFileURL.path
+        if let bookmark = lockScreenFolderBookmark {
+            var stale = false
+            if let folder = try? URL(resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
+                                     relativeTo: nil, bookmarkDataIsStale: &stale),
+               folder.resolvingSymlinksInPath().standardizedFileURL.path == storePath,
+               folder.startAccessingSecurityScopedResource() {
+                if stale, let refreshed = try? folder.bookmarkData(options: .withSecurityScope) {
+                    lockScreenFolderBookmark = refreshed
+                }
+                return (folder, true)
+            }
+            lockScreenFolderBookmark = nil
+        }
+
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.directoryURL = store
         panel.prompt = "Allow Access"
-        panel.message = "To give LiveDesk access, press Shift–Command–G and go to ~/Library/Application Support/com.apple.wallpaper. Then click Allow Access."
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
-        guard folder.resolvingSymlinksInPath() == store.resolvingSymlinksInPath() else {
-            videoError = "Choose the com.apple.wallpaper folder in your Library’s Application Support folder."
-            return
+        panel.message = "One-time setup. Press Shift–Command–G and go to ~/Library/Application Support/com.apple.wallpaper, then click Allow Access."
+        guard await panel.begin() == .OK, let folder = panel.url else { return nil }
+        guard folder.resolvingSymlinksInPath().standardizedFileURL.path == storePath else {
+            throw LockScreenError.wrongFolder
         }
+        let startedAccess = folder.startAccessingSecurityScopedResource()
+        do {
+            lockScreenFolderBookmark = try folder.bookmarkData(options: .withSecurityScope)
+            return (folder, startedAccess)
+        } catch {
+            if startedAccess { folder.stopAccessingSecurityScopedResource() }
+            throw error
+        }
+    }
 
-        isPreparingLockScreen = true
-        videoError = nil
-        Task {
-            defer { isPreparingLockScreen = false }
-            do {
-                let scopedAccess = folder.startAccessingSecurityScopedResource()
-                defer { if scopedAccess { folder.stopAccessingSecurityScopedResource() } }
-                try await LiveDeskAerialRegistrar.install(videoURL: item.url, title: item.name, libraryID: item.id, in: folder)
-                preparedLockScreen = item
-                showLockScreenInstructions = true
-            } catch {
-                videoError = "Couldn’t prepare the live Lock Screen. \(error.localizedDescription)"
+    private func applyAerial(_ assetID: String, in store: URL) async throws {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/WallpaperRefresh.app")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.createsNewApplicationInstance = true
+        configuration.arguments = [assetID]
+        let app = try await NSWorkspace.shared.openApplication(at: helper, configuration: configuration)
+        for _ in 0..<100 {
+            if app.isTerminated {
+                let index = try AerialSelection.readIndex(in: store)
+                guard AerialSelection.selectedID(in: index) == assetID else { throw LockScreenError.applyFailed }
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw LockScreenError.applyFailed
+    }
+
+    private enum LockScreenError: LocalizedError {
+        case wrongFolder, applyFailed
+
+        var errorDescription: String? {
+            switch self {
+            case .wrongFolder:
+                "Choose the com.apple.wallpaper folder in your Library’s Application Support folder."
+            case .applyFailed:
+                "macOS didn’t confirm the wallpaper change. Try again after closing Wallpaper settings."
             }
         }
     }

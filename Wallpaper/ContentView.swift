@@ -30,7 +30,7 @@ struct ContentView: View {
     @State private var sortByName = false
     @State private var browseFilter: BrowseFilter = .all
     @State private var videoToDelete: LibraryVideo?
-    @State private var videoToPublish: LibraryVideo?
+    @State private var confirmingPublicImport = false
     @State private var communityItems: [CommunityWallpaper] = []
     @State private var communityError: String?
     @State private var isLoadingCommunity = false
@@ -45,8 +45,10 @@ struct ContentView: View {
     @StateObject private var communityAuth = CommunityAuth.shared
     @State private var accountEmail = ""
     @State private var accountPassword = ""
+    @State private var accountPasswordConfirmation = ""
     @State private var accountMessage: String?
     @State private var isAuthenticating = false
+    @State private var isCreatingAccount = false
     @AppStorage("selectedLibraryVideoID") private var selectedLibraryVideoID = ""
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
@@ -108,18 +110,27 @@ struct ContentView: View {
             switch result {
             case .success(let url):
                 isImporting = true
-                let currentLibrary = library
                 Task {
                     do {
+                        let session = try await communityAuth.validSession()
+                        let currentLibrary = library
                         let video = try await Task.detached(priority: .userInitiated) {
                             try VideoLibrary.importVideo(from: url, existing: currentLibrary)
                         }.value
                         library.append(video)
-                        select(video)
-                        section = .library
-                        detailID = video.id.uuidString
+                        do {
+                            let source = try VideoLibrary.url(for: video)
+                            let item = try await CommunityService.publish(video: video, source: source, session: session)
+                            library = try VideoLibrary.markPublished(video, communityID: item.id, existing: library)
+                            videoError = nil
+                            await loadCommunity()
+                        } catch {
+                            videoError = "Saved \(video.name) on this Mac, but sharing failed: \(error.localizedDescription). Retry below."
+                        }
+                        section = .submissions
+                        detailID = nil
                     } catch {
-                        videoError = "Couldn’t import video: \(error.localizedDescription)"
+                        videoError = "Couldn’t upload video: \(error.localizedDescription)"
                     }
                     isImporting = false
                 }
@@ -138,16 +149,10 @@ struct ContentView: View {
         } message: {
             Text("The imported copy will be deleted. Your original file will stay where it is.")
         }
-        .confirmationDialog("Publish to Discover?", isPresented: Binding(
-            get: { videoToPublish != nil },
-            set: { if !$0 { videoToPublish = nil } }
-        )) {
-            Button("Publish for Everyone") {
-                if let videoToPublish { publish(videoToPublish) }
-                videoToPublish = nil
-            }
+        .confirmationDialog("Share this video with everyone?", isPresented: $confirmingPublicImport) {
+            Button("Choose Video to Share") { showVideoPicker = true }
         } message: {
-            Text("Everyone using LiveDesk can download this video. Publish only videos you have the right to share.")
+            Text("The video you choose will be copied to this Mac and uploaded to Discover, where anyone can download it. Share only videos you have the right to publish.")
         }
         .task(id: "\(section.rawValue)|\(searchText)") {
             guard section == .discover else { return }
@@ -244,7 +249,7 @@ struct ContentView: View {
                 .padding(7)
                 .background(.quaternary.opacity(0.5), in: Capsule())
             }
-            if detailID == nil {
+            if detailID == nil && section != .account {
                 TextField("Search \(section.rawValue)", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 190)
@@ -262,6 +267,8 @@ struct ContentView: View {
             submissionsView
         case .library:
             libraryView
+        case .account:
+            accountView
         }
     }
 
@@ -348,21 +355,30 @@ struct ContentView: View {
     private var submissionsView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Your imported videos").font(.title.bold())
-                Text("Imports stay private on this Mac. Publish a video to share it with everyone in Discover.")
+                Text("Your uploads").font(.title.bold())
+                Text("Uploading a video adds a local copy to Library and shares it with everyone in Discover.")
                     .foregroundStyle(.secondary)
-                accountPanel
+                if let session = communityAuth.session {
+                    Label("Signed in as \(session.email)", systemImage: "person.crop.circle.fill")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text("Sign in or create an account to upload a video.")
+                        Button("Sign In") { section = .account; isCreatingAccount = false }
+                        Button("Create Account") { section = .account; isCreatingAccount = true }
+                    }
+                }
                 if let videoError { Text(videoError).foregroundStyle(.red) }
-                Button { showVideoPicker = true } label: {
-                    Label("Import Video", systemImage: "plus")
+                Button { confirmingPublicImport = true } label: {
+                    Label(isImporting ? "Uploading…" : "Upload and Share Video", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isImporting)
+                .disabled(isImporting || isPublishing || communityAuth.session == nil)
                 if searchedLibrary.isEmpty {
-                    ContentUnavailableView("No imported videos", systemImage: "film.stack",
+                    ContentUnavailableView("No uploads yet", systemImage: "film.stack",
                                            description: Text(library.isEmpty
-                                                             ? "Import a video to add it to your collection."
-                                                             : "No imported videos match your search."))
+                                                             ? "Sign in and upload a video to share it."
+                                                             : "No uploads match your search."))
                         .frame(maxWidth: .infinity, minHeight: 300)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
@@ -371,9 +387,9 @@ struct ContentView: View {
                                 VStack(alignment: .leading, spacing: 8) {
                                     wallpaperTile(item)
                                     if video.communityID == nil {
-                                        Button("Publish to Discover") { videoToPublish = video }
+                                        Button("Retry Sharing") { publish(video) }
                                             .disabled(isPublishing || communityAuth.session == nil)
-                                            .help(communityAuth.session == nil ? "Sign in above to publish" : "Share this video with everyone")
+                                            .help(communityAuth.session == nil ? "Sign in to retry sharing" : "Upload this local copy to Discover")
                                     } else {
                                         Label("Published", systemImage: "checkmark.circle.fill")
                                             .foregroundStyle(.secondary)
@@ -382,7 +398,7 @@ struct ContentView: View {
                                     .contextMenu {
                                         Button("Open Preview") { openDetail(item) }
                                         if video.communityID == nil {
-                                            Button("Publish to Discover") { videoToPublish = video }
+                                            Button("Retry Sharing") { publish(video) }
                                                 .disabled(isPublishing || communityAuth.session == nil)
                                         }
                                         Button("Remove from Library", role: .destructive) {
@@ -400,56 +416,96 @@ struct ContentView: View {
         }
     }
 
-    private var accountPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let session = communityAuth.session {
-                HStack {
+    private var accountView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Account").font(.largeTitle.bold())
+                if let session = communityAuth.session {
                     Label("Signed in as \(session.email)", systemImage: "person.crop.circle.fill")
-                    Spacer()
+                        .font(.headline)
+                    Text("You can upload and share videos from Submissions. Discover is available to everyone, including people who are signed out.")
+                        .foregroundStyle(.secondary)
+                    Button("Go to Submissions") { section = .submissions }
+                        .buttonStyle(.borderedProminent)
                     Button("Sign Out") {
                         communityAuth.signOut()
-                        accountMessage = nil
+                        accountMessage = "Signed out. You can still browse and download from Discover."
                     }
-                }
-            } else {
-                Text("Sign in to publish").font(.headline)
-                HStack {
-                    TextField("Email", text: $accountEmail)
+                } else {
+                    Picker("Account action", selection: $isCreatingAccount) {
+                        Text("Sign In").tag(false)
+                        Text("Create Account").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 340)
+                    Text(isCreatingAccount ? "Create an account to upload videos to Discover." : "Sign in to upload videos to Discover.")
+                        .foregroundStyle(.secondary)
+                    TextField("Email address", text: $accountEmail)
                         .textContentType(.emailAddress)
+                        .textFieldStyle(.roundedBorder)
                     SecureField("Password", text: $accountPassword)
-                    Button("Sign In") { authenticate(createAccount: false) }
-                        .buttonStyle(.borderedProminent)
-                    Button("Create Account") { authenticate(createAccount: true) }
+                        .textContentType(isCreatingAccount ? .newPassword : .password)
+                        .textFieldStyle(.roundedBorder)
+                    if isCreatingAccount {
+                        SecureField("Confirm password", text: $accountPasswordConfirmation)
+                            .textContentType(.newPassword)
+                            .textFieldStyle(.roundedBorder)
+                        Text("After creating an account, confirm your email, then return here to sign in.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Button(isCreatingAccount ? "Create Account" : "Sign In") {
+                        authenticate(createAccount: isCreatingAccount)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAuthenticating)
+                    if isAuthenticating { ProgressView() }
                 }
-                .disabled(isAuthenticating)
-                Text("Your imports stay private until you select Publish to Discover.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let accountMessage {
+                    Text(accountMessage).font(.callout)
+                        .foregroundStyle(communityAuth.session == nil ? .secondary : .primary)
+                }
             }
-            if let accountMessage {
-                Text(accountMessage).font(.callout).foregroundStyle(.secondary)
-            }
+            .frame(maxWidth: 520, alignment: .leading)
+            .padding(32)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func authenticate(createAccount: Bool) {
         guard !isAuthenticating else { return }
+        let email = accountEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard email.contains("@"), email.contains("."), !accountPassword.isEmpty else {
+            accountMessage = "Enter a valid email address and password."
+            return
+        }
+        if createAccount {
+            guard accountPassword.count >= 6 else {
+                accountMessage = "Use a password with at least 6 characters."
+                return
+            }
+            guard accountPassword == accountPasswordConfirmation else {
+                accountMessage = "The passwords do not match."
+                return
+            }
+        }
         isAuthenticating = true
         accountMessage = nil
         Task {
             do {
                 if createAccount {
-                    let signedIn = try await communityAuth.signUp(email: accountEmail, password: accountPassword)
-                    accountMessage = signedIn ? "Account created and signed in." : "Check your email to confirm your account, then sign in."
+                    let signedIn = try await communityAuth.signUp(email: email, password: accountPassword)
+                    accountMessage = signedIn
+                        ? "Account created. You can now upload from Submissions."
+                        : "Account created. Check your email for a confirmation link, then return here and sign in."
                 } else {
-                    try await communityAuth.signIn(email: accountEmail, password: accountPassword)
-                    accountMessage = nil
+                    try await communityAuth.signIn(email: email, password: accountPassword)
+                    accountMessage = "Signed in. You can now upload from Submissions."
                 }
             } catch {
-                accountMessage = error.localizedDescription
+                accountMessage = "Account request failed: \(error.localizedDescription)"
             }
             accountPassword = ""
+            accountPasswordConfirmation = ""
             isAuthenticating = false
         }
     }
@@ -754,6 +810,7 @@ private enum AppSection: String, CaseIterable, Identifiable {
     case discover = "Discover"
     case submissions = "Submissions"
     case library = "Library"
+    case account = "Account"
 
     var id: String { rawValue }
     var title: String { rawValue }
@@ -762,6 +819,7 @@ private enum AppSection: String, CaseIterable, Identifiable {
         case .discover: "star"
         case .submissions: "cloud"
         case .library: "books.vertical"
+        case .account: "person.crop.circle"
         }
     }
 }

@@ -127,8 +127,12 @@ enum CommunityService {
     static func check(_ response: URLResponse, data: Data = Data()) throws {
         guard let http = response as? HTTPURLResponse else { throw CommunityError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw CommunityError.server(http.statusCode, String(body.prefix(240)))
+            let details = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let message = (details?["msg"] as? String)
+                ?? (details?["message"] as? String)
+                ?? (details?["error_description"] as? String)
+                ?? "Please try again."
+            throw CommunityError.server(http.statusCode, message)
         }
     }
 

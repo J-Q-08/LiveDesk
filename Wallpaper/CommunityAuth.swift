@@ -29,6 +29,7 @@ struct CommunitySession: Codable, Sendable {
     func signUp(email: String, password: String) async throws -> Bool {
         let response = try await authRequest(path: "auth/v1/signup",
                                              body: ["email": email, "password": password])
+        guard response.user != nil else { throw AuthError.invalidResponse }
         if response.accessToken != nil {
             try save(response)
             return true

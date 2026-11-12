@@ -30,6 +30,14 @@ struct ContentView: View {
     @State private var sortByName = false
     @State private var browseFilter: BrowseFilter = .all
     @State private var videoToDelete: LibraryVideo?
+    @State private var videoToPublish: LibraryVideo?
+    @State private var communityItems: [CommunityWallpaper] = []
+    @State private var communityError: String?
+    @State private var isLoadingCommunity = false
+    @State private var communityHasMore = false
+    @State private var isLoadingMoreCommunity = false
+    @State private var isPublishing = false
+    @State private var isDownloading = false
     @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
@@ -38,6 +46,7 @@ struct ContentView: View {
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
+    @AppStorage("communityServerAddress") private var communityServerAddress = "http://localhost:8787"
 
     private var selectedName: String {
         library.first(where: { $0.id.uuidString == selectedLibraryVideoID })?.name ?? "Sample video"
@@ -128,6 +137,33 @@ struct ContentView: View {
             }
         } message: {
             Text("The imported copy will be deleted. Your original file will stay where it is.")
+        }
+        .confirmationDialog("Publish to Discover?", isPresented: Binding(
+            get: { videoToPublish != nil },
+            set: { if !$0 { videoToPublish = nil } }
+        )) {
+            Button("Publish for Everyone") {
+                if let videoToPublish { publish(videoToPublish) }
+                videoToPublish = nil
+            }
+        } message: {
+            Text("Everyone using this server can download this video. Publish only videos you have the right to share.")
+        }
+        .task(id: "\(section.rawValue)|\(searchText)|\(communityServerAddress)") {
+            guard section == .discover else { return }
+            do {
+                isLoadingCommunity = true
+                try await Task.sleep(for: .milliseconds(250))
+                let items = try await CommunityService.list(server: communityServerAddress,
+                                                            query: searchText)
+                try Task.checkCancellation()
+                communityItems = items
+                communityHasMore = items.count == 50
+                communityError = nil
+            } catch {
+                if !Task.isCancelled { communityError = "Couldn’t load Discover: \(error.localizedDescription)" }
+            }
+            isLoadingCommunity = false
         }
         .task(id: selectedVideo?.id) {
             previewIsLoading = true
@@ -275,22 +311,53 @@ struct ContentView: View {
     private var discoverView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Discover your collection").font(.title.bold())
-                Text("Start with the sample or revisit a video you imported recently.")
+                Text("Community wallpapers").font(.title.bold())
+                Text("Videos shared by everyone on this server. Select one to add it to your library.")
                     .foregroundStyle(.secondary)
-                if let sample = allItems.first(where: { $0.id == "sample" }),
-                   searchText.isEmpty || "Sample video".localizedCaseInsensitiveContains(searchText) {
-                    Text("Start here").font(.headline)
-                    wallpaperTile(sample).frame(maxWidth: 400)
+                HStack {
+                    TextField("Community server URL", text: $communityServerAddress)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 360)
+                    if isLoadingCommunity { ProgressView().controlSize(.small) }
+                    Button("Refresh") { Task { await loadCommunity() } }
                 }
-                if !searchedLibrary.isEmpty {
-                    Text("Recently imported").font(.headline)
+                if let communityError {
+                    Text(communityError).foregroundStyle(.red)
+                }
+                if communityItems.isEmpty && !isLoadingCommunity && communityError == nil {
+                    ContentUnavailableView("No shared wallpapers yet", systemImage: "globe",
+                                           description: Text("Publish a video from Submissions to make it appear here."))
+                        .frame(maxWidth: .infinity, minHeight: 300)
+                } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
-                        ForEach(Array(allItems.filter {
-                            $0.id != "sample" && (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
-                        }.reversed().prefix(6))) { item in
-                            wallpaperTile(item)
+                        ForEach(communityItems) { item in
+                            Button { download(item) } label: {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    AsyncImage(url: try? CommunityService.baseURL(communityServerAddress)
+                                        .appending(path: item.thumbnailPath)) { image in
+                                        image.resizable().scaledToFill()
+                                    } placeholder: {
+                                        ZStack {
+                                            Color.black
+                                            Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(height: 190).clipped()
+                                    Text(item.title).font(.headline).lineLimit(1).padding(12)
+                                }
+                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isDownloading)
                         }
+                    }
+                    if communityHasMore {
+                        Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
+                            Task { await loadMoreCommunity() }
+                        }
+                        .disabled(isLoadingMoreCommunity)
+                        .frame(maxWidth: .infinity)
                     }
                 }
             }
@@ -303,7 +370,7 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Your imported videos").font(.title.bold())
-                Text("These videos are stored on this Mac. Open one to preview it, or remove its stored copy from the menu.")
+                Text("Imports stay private on this Mac. Publish a video to share it with everyone in Discover.")
                     .foregroundStyle(.secondary)
                 Button { showVideoPicker = true } label: {
                     Label("Import Video", systemImage: "plus")
@@ -320,9 +387,22 @@ struct ContentView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
                         ForEach(searchedLibrary) { video in
                             if let item = allItems.first(where: { $0.id == video.id.uuidString }) {
-                                wallpaperTile(item)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    wallpaperTile(item)
+                                    if video.communityID == nil {
+                                        Button("Publish to Discover") { videoToPublish = video }
+                                            .disabled(isPublishing)
+                                    } else {
+                                        Label("Published", systemImage: "checkmark.circle.fill")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                                     .contextMenu {
                                         Button("Open Preview") { openDetail(item) }
+                                        if video.communityID == nil {
+                                            Button("Publish to Discover") { videoToPublish = video }
+                                                .disabled(isPublishing)
+                                        }
                                         Button("Remove from Library", role: .destructive) {
                                             videoToDelete = video
                                         }
@@ -438,6 +518,78 @@ struct ContentView: View {
         if item.id == "sample" { selectSample() }
         else if let video = library.first(where: { $0.id.uuidString == item.id }) { select(video) }
         detailID = item.id
+    }
+
+    private func loadCommunity() async {
+        do {
+            isLoadingCommunity = true
+            communityItems = try await CommunityService.list(server: communityServerAddress,
+                                                             query: searchText)
+            communityHasMore = communityItems.count == 50
+            communityError = nil
+        } catch {
+            communityError = "Couldn’t load Discover: \(error.localizedDescription)"
+        }
+        isLoadingCommunity = false
+    }
+
+    private func loadMoreCommunity() async {
+        guard !isLoadingMoreCommunity, communityHasMore else { return }
+        isLoadingMoreCommunity = true
+        do {
+            let next = try await CommunityService.list(server: communityServerAddress,
+                                                        query: searchText, offset: communityItems.count)
+            communityItems.append(contentsOf: next)
+            communityHasMore = next.count == 50
+            communityError = nil
+        } catch {
+            communityError = "Couldn’t load more wallpapers: \(error.localizedDescription)"
+        }
+        isLoadingMoreCommunity = false
+    }
+
+    private func publish(_ video: LibraryVideo) {
+        guard !isPublishing else { return }
+        isPublishing = true
+        Task {
+            do {
+                let source = try VideoLibrary.url(for: video)
+                let item = try await CommunityService.publish(server: communityServerAddress,
+                                                              video: video, source: source)
+                library = try VideoLibrary.markPublished(video, communityID: item.id,
+                                                         existing: library)
+                communityError = nil
+                await loadCommunity()
+            } catch {
+                videoError = "Couldn’t publish \(video.name): \(error.localizedDescription)"
+            }
+            isPublishing = false
+        }
+    }
+
+    private func download(_ item: CommunityWallpaper) {
+        guard !isDownloading else { return }
+        if let video = library.first(where: { $0.communityID == item.id }) {
+            select(video)
+            section = .browse
+            detailID = video.id.uuidString
+            return
+        }
+        isDownloading = true
+        Task {
+            do {
+                let video = try await CommunityService.download(server: communityServerAddress,
+                                                                wallpaper: item, existing: library)
+                library.append(video)
+                select(video)
+                section = .browse
+                detailID = video.id.uuidString
+                communityError = nil
+            } catch {
+                communityError = "Couldn’t download \(item.title): \(error.localizedDescription)"
+            }
+            isDownloading = false
+        }
     }
 
     private func removeVideo(_ video: LibraryVideo) {

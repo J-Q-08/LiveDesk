@@ -4,6 +4,14 @@ struct LibraryVideo: Codable, Identifiable, Sendable {
     let id: UUID
     let name: String
     let filename: String
+    let communityID: String?
+
+    nonisolated init(id: UUID, name: String, filename: String, communityID: String? = nil) {
+        self.id = id
+        self.name = name
+        self.filename = filename
+        self.communityID = communityID
+    }
 }
 
 enum VideoLibrary {
@@ -36,15 +44,22 @@ enum VideoLibrary {
     }
 
     nonisolated static func importVideo(from source: URL, existing: [LibraryVideo]) throws -> LibraryVideo {
+        try importVideo(from: source, extension: source.pathExtension,
+                        title: source.deletingPathExtension().lastPathComponent, existing: existing)
+    }
+
+    nonisolated static func importVideo(from source: URL, extension fileExtension: String,
+                                       title: String, existing: [LibraryVideo],
+                                       communityID: String? = nil) throws -> LibraryVideo {
         let hasScopedAccess = source.startAccessingSecurityScopedResource()
         defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
         let id = UUID()
-        let filename = id.uuidString + "." + source.pathExtension.lowercased()
+        let filename = id.uuidString + "." + fileExtension.lowercased()
         let destination = try directory.appendingPathComponent(filename)
         try FileManager.default.copyItem(at: source, to: destination)
         do {
-            let video = LibraryVideo(id: id, name: source.deletingPathExtension().lastPathComponent,
-                                     filename: filename)
+            let video = LibraryVideo(id: id, name: title, filename: filename,
+                                     communityID: communityID)
             let data = try JSONEncoder().encode(existing + [video])
             try data.write(to: indexURL, options: .atomic)
             return video
@@ -52,6 +67,18 @@ enum VideoLibrary {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
+    }
+
+    nonisolated static func markPublished(_ video: LibraryVideo, communityID: String,
+                                          existing: [LibraryVideo]) throws -> [LibraryVideo] {
+        let updated = existing.map { item in
+            item.id == video.id
+                ? LibraryVideo(id: item.id, name: item.name, filename: item.filename,
+                               communityID: communityID)
+                : item
+        }
+        try JSONEncoder().encode(updated).write(to: indexURL, options: .atomic)
+        return updated
     }
 
     nonisolated static func remove(_ video: LibraryVideo, existing: [LibraryVideo]) throws {

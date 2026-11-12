@@ -6,7 +6,7 @@ To upload a custom video, create an account or sign in on the **Account** page, 
 
 Open `Wallpaper.xcodeproj` in Xcode and run the Wallpaper scheme. The project targets macOS 14 or later. Community metadata is in the Supabase `public.wallpapers` table, and media is in the public `wallpapers` Storage bucket. The schema and row-level security policies are in `supabase/migrations/`. The app contains a publishable key only; it never contains a service role or secret key. Authentication sessions are kept in Keychain. Builds without a provisioned data protection Keychain entitlement use the macOS login Keychain. Use a consistent signing identity for sign-in persistence checks across rebuilds. Existing prototype users may need to sign in once after upgrading from the earlier Keychain entry. Community videos must be playable MP4, MOV, or M4V files up to 50 MB. LiveDesk checks the video before adding it to Library, including when it downloads a wallpaper from Discover.
 
-This build applies live wallpapers to the desktop. Lock Screen integration is an experiment on a separate branch. Desktop rendering across Spaces and multiple displays needs hardware verification before distribution.
+On macOS Tahoe or later, open a video in Library and choose **Set as Live Lock Screen…**. Select the `com.apple.wallpaper` folder when macOS asks for access, then select the video under **LiveDesk** in System Settings → Wallpaper. macOS can use this selection for the desktop as well. This integration uses the per-user Aerial catalog and may need updates when macOS changes its format. Desktop rendering across Spaces and multiple displays needs hardware verification before distribution.
 
 ## Release verification
 

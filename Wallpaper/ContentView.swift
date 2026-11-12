@@ -58,6 +58,9 @@ struct ContentView: View {
     @State private var loginItemStatus: SMAppService.Status = .notRegistered
     @State private var loginError: String?
     @State private var previewError: String?
+    @State private var isPreparingLockScreen = false
+    @State private var preparedLockScreen: WallpaperItem?
+    @State private var showLockScreenInstructions = false
     @StateObject private var communityAuth = CommunityAuth.shared
     @State private var accountEmail = ""
     @State private var accountPassword = ""
@@ -212,6 +215,17 @@ struct ContentView: View {
             }
             .padding(24)
             .frame(width: 460)
+        }
+        .alert("Choose your live Lock Screen", isPresented: $showLockScreenInstructions,
+               presenting: preparedLockScreen) { _ in
+            Button("Open Wallpaper Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Button("Done", role: .cancel) {}
+        } message: { item in
+            Text("In Wallpaper settings, choose \(item.name) under LiveDesk. If Wallpaper settings were already open, quit System Settings and reopen it to refresh the list.")
         }
         .alert("Rename Local Copy", isPresented: Binding(
             get: { videoToRename != nil },
@@ -973,6 +987,13 @@ struct ContentView: View {
                     }
                     Button("Set as Desktop Background") { setDesktopBackground(item) }
                         .buttonStyle(GlassActionStyle()).disabled(currentPlayback == nil)
+                    if section == .library {
+                        Button(isPreparingLockScreen ? "Preparing Lock Screen…" : "Set as Live Lock Screen…") {
+                            prepareLockScreen(item)
+                        }
+                        .buttonStyle(GlassActionStyle())
+                        .disabled(currentPlayback == nil || isPreparingLockScreen)
+                    }
                     Button("Export Still Image…") { exportStillImage(from: item.url) }
                         .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
                         .disabled(currentPlayback == nil)
@@ -1263,6 +1284,43 @@ struct ContentView: View {
         desktop.apply(playback, id: item.id, layout: videoLayout)
     }
 
+    private func prepareLockScreen(_ item: WallpaperItem) {
+        guard !isPreparingLockScreen, playback?.sourceURL == item.url, detailID == item.id else { return }
+        guard #available(macOS 26.0, *), let home = Self.userHomeDirectory else {
+            videoError = "Live Lock Screen requires macOS Tahoe or later."
+            return
+        }
+
+        let store = home.appendingPathComponent("Library/Application Support/com.apple.wallpaper",
+                                               isDirectory: true)
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.directoryURL = store
+        panel.prompt = "Allow Access"
+        panel.message = "To give LiveDesk access, press Shift–Command–G and go to ~/Library/Application Support/com.apple.wallpaper. Then click Allow Access."
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        guard folder.resolvingSymlinksInPath() == store.resolvingSymlinksInPath() else {
+            videoError = "Choose the com.apple.wallpaper folder in your Library’s Application Support folder."
+            return
+        }
+
+        isPreparingLockScreen = true
+        videoError = nil
+        Task {
+            defer { isPreparingLockScreen = false }
+            do {
+                let scopedAccess = folder.startAccessingSecurityScopedResource()
+                defer { if scopedAccess { folder.stopAccessingSecurityScopedResource() } }
+                try await LiveDeskAerialRegistrar.install(videoURL: item.url, title: item.name, libraryID: item.id, in: folder)
+                preparedLockScreen = item
+                showLockScreenInstructions = true
+            } catch {
+                videoError = "Couldn’t prepare the live Lock Screen. \(error.localizedDescription)"
+            }
+        }
+    }
+
     private func exportStillImage(from url: URL) {
         Task {
             do {
@@ -1286,11 +1344,11 @@ struct ContentView: View {
     private var isInstalledApp: Bool {
         let path = Bundle.main.bundleURL.path
         if path.hasPrefix("/Applications/") { return true }
-        guard let userApplications = Self.userApplicationsPath else { return false }
-        return path.hasPrefix(userApplications)
+        guard let home = Self.userHomeDirectory else { return false }
+        return path.hasPrefix(home.appendingPathComponent("Applications").path + "/")
     }
 
-    private static let userApplicationsPath: String? = {
+    private static let userHomeDirectory: URL? = {
         // Resolve the account's home from its Unix record because Foundation reports the sandbox home.
         let bufferSize = sysconf(_SC_GETPW_R_SIZE_MAX)
         var buffer = [CChar](repeating: 0, count: bufferSize > 0 ? bufferSize : 16_384)
@@ -1299,7 +1357,7 @@ struct ContentView: View {
         return buffer.withUnsafeMutableBufferPointer { storage in
             guard getpwuid_r(getuid(), &entry, storage.baseAddress, storage.count, &result) == 0,
                   result != nil, let directory = entry.pw_dir else { return nil }
-            return String(cString: directory) + "/Applications/"
+            return URL(fileURLWithPath: String(cString: directory), isDirectory: true)
         }
     }()
 

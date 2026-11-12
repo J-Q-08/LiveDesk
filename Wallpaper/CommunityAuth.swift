@@ -95,6 +95,11 @@ struct CommunitySession: Codable, Sendable {
         guard status == errSecSuccess else {
             throw AuthError.keychain(status)
         }
+        let (savedData, readStatus) = await KeychainStore.shared.read()
+        guard readStatus == errSecSuccess else {
+            throw AuthError.keychain(readStatus)
+        }
+        guard savedData == data else { throw AuthError.keychainVerification }
         restoreGeneration += 1
         session = next
         isRestoring = false
@@ -119,12 +124,13 @@ struct CommunitySession: Codable, Sendable {
     }
 
     private enum AuthError: LocalizedError {
-        case signInRequired, invalidResponse, keychain(OSStatus)
+        case signInRequired, invalidResponse, keychain(OSStatus), keychainVerification
         var errorDescription: String? {
             switch self {
             case .signInRequired: "Sign in to publish a video."
             case .invalidResponse: "The sign-in service returned an invalid response."
             case .keychain(let status): "Couldn’t securely save your sign-in on this Mac (Keychain error \(status))."
+            case .keychainVerification: "Saved sign-in did not match what Keychain returned. Please try again."
             }
         }
     }

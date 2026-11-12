@@ -61,6 +61,24 @@ enum CommunityService {
         _ = try await list(limit: 1)
     }
 
+    static func inspectMedia(path: String) async -> CommunityMediaMetadata {
+        guard let url = mediaURL(path: path) else {
+            return CommunityMediaMetadata(dimensions: nil, bytes: nil)
+        }
+        async let dimensions = try? VideoPlayback.inspect(AVURLAsset(url: url))
+        async let bytes = remoteFileSize(url)
+        return await CommunityMediaMetadata(dimensions: dimensions, bytes: bytes)
+    }
+
+    private static func remoteFileSize(_ url: URL) async -> Int64? {
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              http.expectedContentLength > 0 else { return nil }
+        return http.expectedContentLength
+    }
+
     static func publish(video: LibraryVideo, source: URL,
                         account: CommunityAuth.PublishingAccount) async throws -> CommunityWallpaper {
         let fileExtension = source.pathExtension.lowercased()

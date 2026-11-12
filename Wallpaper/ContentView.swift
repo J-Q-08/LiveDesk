@@ -30,6 +30,9 @@ struct ContentView: View {
     @State private var sortByName = false
     @State private var browseFilter: BrowseFilter = .all
     @State private var videoToDelete: LibraryVideo?
+    @State private var videoToRename: LibraryVideo?
+    @State private var localName = ""
+    @State private var libraryError: String?
     @State private var confirmingPublicImport = false
     @State private var communityItems: [CommunityWallpaper] = []
     @State private var communityQuery: String?
@@ -56,6 +59,8 @@ struct ContentView: View {
     @State private var isAuthenticating = false
     @State private var isCreatingAccount = false
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
+
+    private var trimmedLocalName: String { localName.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var searchText: String { searches[section] ?? "" }
     private var searchBinding: Binding<String> {
@@ -106,6 +111,16 @@ struct ContentView: View {
                         Label(downloadError, systemImage: "exclamationmark.circle")
                         Spacer()
                         Button("Dismiss") { self.downloadError = nil }
+                    }
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 8)
+                }
+                if let libraryError {
+                    HStack {
+                        Label(libraryError, systemImage: "exclamationmark.circle")
+                        Spacer()
+                        Button("Dismiss") { self.libraryError = nil }
                     }
                     .foregroundStyle(.red)
                     .padding(.horizontal, 24)
@@ -169,6 +184,20 @@ struct ContentView: View {
             .padding(24)
             .frame(width: 460)
         }
+        .alert("Rename Local Copy", isPresented: Binding(
+            get: { videoToRename != nil },
+            set: { if !$0 { videoToRename = nil } }
+        )) {
+            TextField("Wallpaper name", text: $localName)
+            Button("Cancel", role: .cancel) { videoToRename = nil }
+            Button("Rename") {
+                if let videoToRename { renameVideo(videoToRename) }
+                videoToRename = nil
+            }
+            .disabled(trimmedLocalName.isEmpty || trimmedLocalName.count > 100)
+        } message: {
+            Text("Choose a name of up to 100 characters. This changes the name in your Library on this Mac.")
+        }
         .confirmationDialog("Remove video from library?", isPresented: Binding(
             get: { videoToDelete != nil },
             set: { if !$0 { videoToDelete = nil } }
@@ -178,7 +207,7 @@ struct ContentView: View {
                 videoToDelete = nil
             }
         } message: {
-            Text("The imported copy will be deleted. Your original file will stay where it is.")
+            Text("This deletes the copy on this Mac. Any original file and shared upload stay available.")
         }
         .confirmationDialog("Share this video with everyone?", isPresented: $confirmingPublicImport) {
             Button("Choose Video to Share") { showVideoPicker = true }
@@ -499,17 +528,6 @@ struct ContentView: View {
                                             .foregroundStyle(.secondary)
                                     }
                                 }
-                                    .contextMenu {
-                                        Button("Open Preview") { openDetail(item) }
-                                        if video.communityID == nil {
-                                            Button("Retry Sharing") { publish(video) }
-                                                .disabled(isImporting || isPublishing || communityAuth.session == nil)
-                                        }
-                                        Button("Remove from Library", role: .destructive) {
-                                            videoToDelete = video
-                                        }
-                                        .disabled(desktop.appliedVideoID == video.id.uuidString)
-                                    }
                             }
                         }
                     }
@@ -633,6 +651,23 @@ struct ContentView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if let video = library.first(where: { $0.id.uuidString == item.id }) {
+                localVideoActions(video)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func localVideoActions(_ video: LibraryVideo) -> some View {
+        Button("Rename Local Copy…") {
+            localName = video.name
+            videoToRename = video
+        }
+        Button("Remove from Library…", role: .destructive) {
+            videoToDelete = video
+        }
+        .disabled(desktop.appliedVideoID == video.id.uuidString || isImporting || isPublishing)
     }
 
     private func wallpaperTileTitle(_ title: String) -> some View {
@@ -653,7 +688,20 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 18) {
             Button { detailID = nil } label: { Label("Back to \(section.rawValue)", systemImage: "chevron.left") }
                 .buttonStyle(.plain)
-            Text(item.name).font(.largeTitle.bold())
+            HStack {
+                Text(item.name).font(.largeTitle.bold())
+                Spacer()
+                if let video = library.first(where: { $0.id.uuidString == item.id }) {
+                    Menu {
+                        localVideoActions(video)
+                    } label: {
+                        Label("Manage Local Copy", systemImage: "ellipsis.circle")
+                            .labelStyle(.iconOnly)
+                    }
+                    .help("Manage Local Copy")
+                    .fixedSize()
+                }
+            }
             VideoCanvas(player: currentPlayback?.previewPlayer, videoSize: currentPlayback?.videoSize ?? .zero,
                         videoLayout: videoLayout, isPreview: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -887,20 +935,32 @@ struct ContentView: View {
         }
     }
 
+    private func renameVideo(_ video: LibraryVideo) {
+        let name = trimmedLocalName
+        guard !name.isEmpty, name.count <= 100 else { return }
+        do {
+            library = try VideoLibrary.rename(video, to: name)
+            libraryError = nil
+        } catch {
+            libraryError = "Couldn’t rename \(video.name): \(error.localizedDescription)"
+        }
+    }
+
     private func removeVideo(_ video: LibraryVideo) {
         guard desktop.appliedVideoID != video.id.uuidString else {
-            videoError = "Change the active desktop wallpaper before removing this video."
+            libraryError = "Stop or change the active wallpaper before removing this video."
+            return
+        }
+        guard !isImporting, !isPublishing else {
+            libraryError = "Wait for sharing to finish before removing this video."
             return
         }
         do {
-            try VideoLibrary.remove(video)
-            library = try VideoLibrary.load()
-            if detailID == video.id.uuidString {
-                detailID = nil
-            }
-            videoError = nil
+            library = try VideoLibrary.remove(video)
+            if detailID == video.id.uuidString { detailID = nil }
+            libraryError = nil
         } catch {
-            videoError = "Couldn’t remove \(video.name): \(error.localizedDescription)"
+            libraryError = "Couldn’t remove \(video.name): \(error.localizedDescription)"
         }
     }
 
@@ -910,7 +970,7 @@ struct ContentView: View {
             configureLoginItem()
             desktop.restoreIfNeeded(from: library)
         } catch {
-            videoError = "Couldn’t load your video library: \(error.localizedDescription)"
+            libraryError = "Couldn’t load your video library: \(error.localizedDescription)"
         }
     }
 

@@ -116,7 +116,21 @@ enum VideoLibrary {
         }
     }
 
-    nonisolated static func remove(_ video: LibraryVideo) throws {
+    nonisolated static func rename(_ video: LibraryVideo, to name: String) throws -> [LibraryVideo] {
+        try indexLock.withLock {
+            var items = try loadUnlocked()
+            guard let index = items.firstIndex(where: { $0.id == video.id }) else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            let current = items[index]
+            items[index] = LibraryVideo(id: current.id, name: name, filename: current.filename,
+                                        communityID: current.communityID)
+            try JSONEncoder().encode(items).write(to: indexURL, options: .atomic)
+            return items
+        }
+    }
+
+    nonisolated static func remove(_ video: LibraryVideo) throws -> [LibraryVideo] {
         try indexLock.withLock {
             let remaining = try loadUnlocked().filter { $0.id != video.id }
             let original = try directory.appendingPathComponent(video.filename)
@@ -129,6 +143,7 @@ enum VideoLibrary {
                 throw error
             }
             try? FileManager.default.removeItem(at: staged)
+            return remaining
         }
     }
 }

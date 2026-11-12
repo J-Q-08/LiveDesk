@@ -478,7 +478,7 @@ struct ContentView: View {
                                     wallpaperTile(item)
                                     if video.communityID == nil {
                                         Button("Retry Sharing") { publish(video) }
-                                            .disabled(isPublishing || communityAuth.session == nil)
+                                            .disabled(isImporting || isPublishing || communityAuth.session == nil)
                                             .help(communityAuth.session == nil ? "Sign in to retry sharing" : "Upload this local copy to Discover")
                                     } else {
                                         Label("Published", systemImage: "checkmark.circle.fill")
@@ -489,7 +489,7 @@ struct ContentView: View {
                                         Button("Open Preview") { openDetail(item) }
                                         if video.communityID == nil {
                                             Button("Retry Sharing") { publish(video) }
-                                                .disabled(isPublishing || communityAuth.session == nil)
+                                                .disabled(isImporting || isPublishing || communityAuth.session == nil)
                                         }
                                         Button("Remove from Library", role: .destructive) {
                                             videoToDelete = video
@@ -793,7 +793,7 @@ struct ContentView: View {
     }
 
     private func importAndShare(url: URL, title: String) {
-        guard !isImporting, !title.isEmpty, title.count <= 100 else { return }
+        guard !isImporting, !isPublishing, !title.isEmpty, title.count <= 100 else { return }
         guard ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
             videoError = "Choose an MP4, MOV, or M4V video."
             return
@@ -830,21 +830,21 @@ struct ContentView: View {
     }
 
     private func publish(_ video: LibraryVideo) {
-        guard !isPublishing else { return }
+        guard !isImporting, !isPublishing else { return }
         isPublishing = true
+        videoError = nil
         Task {
+            defer { isPublishing = false }
             do {
                 let source = try VideoLibrary.url(for: video)
                 let session = try await communityAuth.validSession()
                 let item = try await CommunityService.publish(video: video, source: source, session: session)
                 library = try VideoLibrary.markPublished(video, communityID: item.id)
-                communityError = nil
                 await loadCommunity()
                 await loadMyCloud(userID: session.userID)
             } catch {
                 videoError = "Couldn’t publish \(video.name): \(error.localizedDescription)"
             }
-            isPublishing = false
         }
     }
 

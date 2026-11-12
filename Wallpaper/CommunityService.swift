@@ -59,13 +59,19 @@ enum CommunityService {
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
         let fileSize = (attributes[.size] as? NSNumber)?.intValue ?? 0
         guard fileSize <= 52_428_800 else { throw CommunityError.tooLarge }
-        let id = UUID().uuidString.lowercased()
+        // A local video keeps the same remote identity across retries.
+        let id = video.id.uuidString.lowercased()
         let path = "\(session.userID)/\(id).\(fileExtension)"
-        try await upload(source, path: path, mimeType: fileExtension == "mov" ? "video/quicktime" : "video/mp4", token: session.accessToken)
+        if let existing = try await publishedItem(id: id) { return existing }
+        if try await !mediaExists(path: path) {
+            try await upload(source, path: path, mimeType: fileExtension == "mov" ? "video/quicktime" : "video/mp4", token: session.accessToken)
+        }
         var thumbnailPath: String?
         if let thumbnail = try? await thumbnail(for: source) {
             let candidate = "\(session.userID)/\(id).png"
-            if (try? await upload(thumbnail, path: candidate, mimeType: "image/png", token: session.accessToken)) != nil {
+            if (try? await mediaExists(path: candidate)) == true {
+                thumbnailPath = candidate
+            } else if (try? await upload(thumbnail, path: candidate, mimeType: "image/png", token: session.accessToken)) != nil {
                 thumbnailPath = candidate
             }
         }
@@ -79,12 +85,54 @@ enum CommunityService {
             "id": id, "owner_id": session.userID, "title": String(video.name.prefix(100)),
             "video_path": path, "thumbnail_path": thumbnailPath as Any? ?? NSNull(), "file_extension": fileExtension
         ])
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try check(response, data: data)
+            guard let published = try JSONDecoder().decode([CommunityWallpaper].self, from: data).first else {
+                throw CommunityError.invalidResponse
+            }
+            return published
+        } catch {
+            // The insert may have succeeded even if its response never reached this Mac.
+            if let existing = try? await publishedItem(id: id) { return existing }
+            throw error
+        }
+    }
+
+    private static func publishedItem(id: String) async throws -> CommunityWallpaper? {
+        var components = URLComponents(url: projectURL.appending(path: "rest/v1/wallpapers"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            .init(name: "select", value: "id,title,created_at,video_path,thumbnail_path,file_extension"),
+            .init(name: "id", value: "eq.\(id)"),
+            .init(name: "limit", value: "1")
+        ]
+        var request = URLRequest(url: components.url!)
+        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
         let (data, response) = try await URLSession.shared.data(for: request)
         try check(response, data: data)
-        guard let published = try JSONDecoder().decode([CommunityWallpaper].self, from: data).first else {
-            throw CommunityError.invalidResponse
+        return try JSONDecoder().decode([CommunityWallpaper].self, from: data).first
+    }
+
+    private static func mediaExists(path: String) async throws -> Bool {
+        guard let url = mediaURL(path: path) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw CommunityError.invalidResponse }
+        if http.statusCode == 404 { return false }
+        if http.statusCode == 400 {
+            // Storage returns 400 for a missing object on HEAD; GET supplies its error code.
+            var probe = URLRequest(url: url)
+            probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            let (data, probeResponse) = try await URLSession.shared.data(for: probe)
+            if let probeHTTP = probeResponse as? HTTPURLResponse, probeHTTP.statusCode == 400,
+               let details = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               details["code"] as? String == "NoSuchKey" { return false }
+            try check(probeResponse, data: data)
+            return true
         }
-        return published
+        try check(response)
+        return true
     }
 
     static func download(wallpaper: CommunityWallpaper, existing: [LibraryVideo]) async throws -> LibraryVideo {

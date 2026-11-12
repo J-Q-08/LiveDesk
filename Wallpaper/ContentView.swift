@@ -8,6 +8,7 @@
 import SwiftUI
 import AVFoundation
 import AppKit
+import Darwin
 import UniformTypeIdentifiers
 import ServiceManagement
 
@@ -49,7 +50,7 @@ struct ContentView: View {
     @State private var isPublishing = false
     @State private var downloadingTitle: String?
     @State private var downloadError: String?
-    @State private var launchAtLogin = false
+    @State private var loginItemStatus: SMAppService.Status = .notRegistered
     @State private var loginError: String?
     @State private var previewError: String?
     @StateObject private var communityAuth = CommunityAuth.shared
@@ -151,6 +152,10 @@ struct ContentView: View {
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
             loadLibrary()
+            configureLoginItem()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            loginItemStatus = SMAppService.mainApp.status
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displayConfiguration += 1
@@ -301,12 +306,12 @@ struct ContentView: View {
                 .help(connectionStatus == .connected ? "Connected to Supabase" : connectionStatus.title)
             Divider()
             Toggle("Launch at Login", isOn: Binding(
-                get: { launchAtLogin },
+                get: { loginItemStatus == .enabled || loginItemStatus == .requiresApproval },
                 set: { updateLaunchAtLogin($0) }
             ))
             .disabled(!isInstalledApp)
-            if let loginError {
-                Text(loginError).font(.caption).foregroundStyle(.secondary)
+            if let loginItemMessage {
+                Text(loginItemMessage).font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -1004,7 +1009,6 @@ struct ContentView: View {
     private func loadLibrary() {
         do {
             library = try VideoLibrary.load()
-            configureLoginItem()
         } catch {
             libraryError = "Couldn’t load your video library: \(error.localizedDescription)"
         }
@@ -1037,23 +1041,42 @@ struct ContentView: View {
 
     private var isInstalledApp: Bool {
         let path = Bundle.main.bundleURL.path
-        return path.hasPrefix("/Applications/") || path.hasPrefix(NSHomeDirectory() + "/Applications/")
+        if path.hasPrefix("/Applications/") { return true }
+        guard let userApplications = Self.userApplicationsPath else { return false }
+        return path.hasPrefix(userApplications)
+    }
+
+    private static let userApplicationsPath: String? = {
+        // Resolve the account's home from its Unix record because Foundation reports the sandbox home.
+        let bufferSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+        var buffer = [CChar](repeating: 0, count: bufferSize > 0 ? bufferSize : 16_384)
+        var entry = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        return buffer.withUnsafeMutableBufferPointer { storage in
+            guard getpwuid_r(getuid(), &entry, storage.baseAddress, storage.count, &result) == 0,
+                  result != nil, let directory = entry.pw_dir else { return nil }
+            return String(cString: directory) + "/Applications/"
+        }
+    }()
+
+    private var loginItemMessage: String? {
+        if !isInstalledApp { return "Move LiveDesk to Applications to enable launch at login." }
+        if let loginError { return loginError }
+        if loginItemStatus == .requiresApproval {
+            return "Approve LiveDesk in System Settings → Login Items."
+        }
+        return nil
     }
 
     private func configureLoginItem() {
         let service = SMAppService.mainApp
-        launchAtLogin = service.status == .enabled || service.status == .requiresApproval
-        guard isInstalledApp else {
-            loginError = "Move LiveDesk to Applications to enable launch at login."
-            return
-        }
-        guard launchAtLoginPreference, service.status == .notRegistered else { return }
+        loginItemStatus = service.status
+        guard isInstalledApp, launchAtLoginPreference,
+              loginItemStatus == .notRegistered || loginItemStatus == .notFound else { return }
+        defer { loginItemStatus = service.status }
         do {
             try service.register()
-            launchAtLogin = service.status == .enabled || service.status == .requiresApproval
-            if service.status == .requiresApproval {
-                loginError = "Approve LiveDesk in System Settings → Login Items."
-            }
+            loginError = nil
         } catch {
             loginError = "Couldn’t enable launch at login: \(error.localizedDescription)"
         }
@@ -1061,16 +1084,15 @@ struct ContentView: View {
 
     private func updateLaunchAtLogin(_ enabled: Bool) {
         guard isInstalledApp else { return }
+        let service = SMAppService.mainApp
+        defer { loginItemStatus = service.status }
         do {
-            if enabled { try SMAppService.mainApp.register() }
-            else { try SMAppService.mainApp.unregister() }
+            if enabled { try service.register() }
+            else { try service.unregister() }
             launchAtLoginPreference = enabled
-            launchAtLogin = SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval
-            loginError = SMAppService.mainApp.status == .requiresApproval
-                ? "Approve LiveDesk in System Settings → Login Items." : nil
+            loginError = nil
         } catch {
             loginError = "Couldn’t change launch at login: \(error.localizedDescription)"
-            launchAtLogin = SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval
         }
     }
 }

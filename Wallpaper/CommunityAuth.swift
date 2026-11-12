@@ -34,17 +34,19 @@ struct CommunitySession: Codable, Sendable {
     }
 
     func signIn(email: String, password: String) async throws {
+        let generation = restoreGeneration
         let response = try await authRequest(path: "auth/v1/token?grant_type=password",
                                              body: ["email": email, "password": password])
-        try await save(response)
+        try await save(response, expectedGeneration: generation)
     }
 
     func signUp(email: String, password: String) async throws -> Bool {
+        let generation = restoreGeneration
         let response = try await authRequest(path: "auth/v1/signup",
                                              body: ["email": email, "password": password])
         guard response.user != nil else { throw AuthError.invalidResponse }
         if response.accessToken != nil {
-            try await save(response)
+            try await save(response, expectedGeneration: generation)
             return true
         }
         return false
@@ -53,9 +55,11 @@ struct CommunitySession: Codable, Sendable {
     func validSession() async throws -> CommunitySession {
         guard let current = session else { throw AuthError.signInRequired }
         if current.expiresAt > Date().addingTimeInterval(60) { return current }
+        let generation = restoreGeneration
         let response = try await authRequest(path: "auth/v1/token?grant_type=refresh_token",
                                              body: ["refresh_token": current.refreshToken])
-        try await save(response)
+        guard session?.refreshToken == current.refreshToken else { throw AuthError.sessionChanged }
+        try await save(response, expectedGeneration: generation)
         guard let session else { throw AuthError.signInRequired }
         return session
     }
@@ -83,7 +87,8 @@ struct CommunitySession: Codable, Sendable {
         return try JSONDecoder().decode(AuthResponse.self, from: data)
     }
 
-    private func save(_ response: AuthResponse) async throws {
+    private func save(_ response: AuthResponse, expectedGeneration: Int) async throws {
+        guard restoreGeneration == expectedGeneration else { throw AuthError.sessionChanged }
         guard let accessToken = response.accessToken,
               let refreshToken = response.refreshToken,
               let user = response.user else { throw AuthError.invalidResponse }
@@ -91,15 +96,12 @@ struct CommunitySession: Codable, Sendable {
                                     expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn ?? 3600)),
                                     userID: user.id, email: user.email ?? "")
         let data = try JSONEncoder().encode(next)
-        let status = await KeychainStore.shared.write(data)
+        let (status, matches) = await KeychainStore.shared.writeAndVerify(data)
         guard status == errSecSuccess else {
             throw AuthError.keychain(status)
         }
-        let (savedData, readStatus) = await KeychainStore.shared.read()
-        guard readStatus == errSecSuccess else {
-            throw AuthError.keychain(readStatus)
-        }
-        guard savedData == data else { throw AuthError.keychainVerification }
+        guard matches else { throw AuthError.keychainVerification }
+        guard restoreGeneration == expectedGeneration else { throw AuthError.sessionChanged }
         restoreGeneration += 1
         session = next
         isRestoring = false
@@ -124,10 +126,11 @@ struct CommunitySession: Codable, Sendable {
     }
 
     private enum AuthError: LocalizedError {
-        case signInRequired, invalidResponse, keychain(OSStatus), keychainVerification
+        case signInRequired, sessionChanged, invalidResponse, keychain(OSStatus), keychainVerification
         var errorDescription: String? {
             switch self {
             case .signInRequired: "Sign in to publish a video."
+            case .sessionChanged: "Your account changed during this request. Please try again."
             case .invalidResponse: "The sign-in service returned an invalid response."
             case .keychain(let status): "Couldn’t securely save your sign-in on this Mac (Keychain error \(status))."
             case .keychainVerification: "Saved sign-in did not match what Keychain returned. Please try again."
@@ -149,14 +152,18 @@ private actor KeychainStore {
         return (result as? Data, status)
     }
 
-    func write(_ data: Data) -> OSStatus {
+    func writeAndVerify(_ data: Data) -> (OSStatus, Bool) {
         let update: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
-        if status != errSecItemNotFound { return status }
-        var attributes = baseQuery()
-        attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(attributes as CFDictionary, nil)
+        var status = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var attributes = baseQuery()
+            attributes[kSecValueData as String] = data
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(attributes as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else { return (status, false) }
+        let (stored, readStatus) = read()
+        return (readStatus, stored == data)
     }
 
     func delete() {

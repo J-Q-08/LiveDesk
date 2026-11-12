@@ -450,7 +450,7 @@ struct ContentView: View {
                         SecureField("Confirm password", text: $accountPasswordConfirmation)
                             .textContentType(.newPassword)
                             .textFieldStyle(.roundedBorder)
-                        Text("After creating an account, confirm your email, then return here to sign in.")
+                        Text("Accounts are created immediately for this prototype. You can upload as soon as registration succeeds.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     Button(isCreatingAccount ? "Create Account" : "Sign In") {
@@ -496,7 +496,7 @@ struct ContentView: View {
                     let signedIn = try await communityAuth.signUp(email: email, password: accountPassword)
                     accountMessage = signedIn
                         ? "Account created. You can now upload from Submissions."
-                        : "Account created. Check your email for a confirmation link, then return here and sign in."
+                        : "Account created, but sign-in is pending. Check your email, then return here and sign in."
                 } else {
                     try await communityAuth.signIn(email: email, password: accountPassword)
                     accountMessage = "Signed in. You can now upload from Submissions."

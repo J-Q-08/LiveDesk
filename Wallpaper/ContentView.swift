@@ -448,7 +448,7 @@ struct ContentView: View {
                         Text("No videos uploaded to Supabase yet.")
                             .foregroundStyle(.secondary)
                     } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16, alignment: .top)], spacing: 16) {
                             ForEach(myCloudItems) { item in communityTile(item) }
                         }
                     }
@@ -463,7 +463,7 @@ struct ContentView: View {
                                                              : "No uploads match your search."))
                         .frame(maxWidth: .infinity, minHeight: 300)
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16, alignment: .top)], spacing: 16) {
                         ForEach(searchedLibrary) { video in
                             if let item = allItems.first(where: { $0.id == video.id.uuidString }) {
                                 VStack(alignment: .leading, spacing: 8) {

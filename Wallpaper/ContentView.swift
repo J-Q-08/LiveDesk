@@ -538,12 +538,12 @@ struct ContentView: View {
                 if isGrid {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top),
                                              count: columnCount), alignment: .leading, spacing: 24) {
-                        ForEach(libraryItems) { item in wallpaperTile(item) }
+                        ForEach(libraryItems) { item in wallpaperTile(item, previewsOnHover: true) }
                     }
                     .padding(.horizontal, 24).padding(.bottom, 20)
                 } else {
                     LazyVStack(spacing: 16) {
-                        ForEach(libraryItems) { item in wallpaperTile(item) }
+                        ForEach(libraryItems) { item in wallpaperTile(item, previewsOnHover: true) }
                     }
                     .frame(maxWidth: 520)
                     .frame(maxWidth: .infinity)
@@ -593,7 +593,7 @@ struct ContentView: View {
                         if !visibleItems.isEmpty {
                             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top),
                                                      count: columnCount), alignment: .leading, spacing: 24) {
-                                ForEach(visibleItems) { item in communityTile(item, captionsBelow: true) }
+                                ForEach(visibleItems) { item in communityTile(item, previewsOnHover: true) }
                             }
                         } else if communityQuery != searchText || isLoadingCommunity {
                             ProgressView("Loading wallpapers…").frame(maxWidth: .infinity, minHeight: 180)
@@ -678,17 +678,26 @@ struct ContentView: View {
         }
     }
 
-    private func hasLocalCopy(of item: CommunityWallpaper) -> Bool {
-        library.contains { $0.communityID == item.id && (try? VideoLibrary.url(for: $0)) != nil }
+    private func localCopyURL(for item: CommunityWallpaper) -> URL? {
+        for video in library where video.communityID == item.id {
+            if let url = try? VideoLibrary.url(for: video) { return url }
+        }
+        return nil
     }
 
-    private func communityTile(_ item: CommunityWallpaper, captionsBelow: Bool = false) -> some View {
-        let isLocal = hasLocalCopy(of: item)
+    private func communityTile(_ item: CommunityWallpaper, previewsOnHover: Bool = false) -> some View {
+        let localURL = localCopyURL(for: item)
+        let isLocal = localURL != nil
         let action = isLocal ? "Open in Library" : "Download to Library"
+        let thumbnail = CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
         return Button { download(item) } label: {
-            GalleryTile(title: item.title, symbol: isLocal ? "arrow.up.right" : "arrow.down",
-                        subtitle: nil, captionsBelow: captionsBelow) {
-                CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
+            if previewsOnHover {
+                HoverWallpaperTile(title: item.title, videoURL: localURL ?? CommunityService.mediaURL(path: item.videoPath)) {
+                    thumbnail
+                }
+            } else {
+                GalleryTile(title: item.title, symbol: isLocal ? "arrow.up.right" : "arrow.down",
+                            subtitle: nil, captionsBelow: false) { thumbnail }
             }
         }
         .buttonStyle(.plain)
@@ -885,12 +894,18 @@ struct ContentView: View {
         }
     }
 
-    private func wallpaperTile(_ item: WallpaperItem) -> some View {
+    private func wallpaperTile(_ item: WallpaperItem, previewsOnHover: Bool = false) -> some View {
         Button { openDetail(item) } label: {
-            GalleryTile(title: item.name, symbol: "play.fill",
-                        subtitle: desktop.appliedVideoID == item.id ? "Current wallpaper" : nil,
-                        captionsBelow: true) {
-                VideoThumbnail(url: item.url)
+            if previewsOnHover {
+                HoverWallpaperTile(title: item.name, videoURL: item.url) {
+                    VideoThumbnail(url: item.url)
+                }
+            } else {
+                GalleryTile(title: item.name, symbol: "play.fill",
+                            subtitle: desktop.appliedVideoID == item.id ? "Current wallpaper" : nil,
+                            captionsBelow: true) {
+                    VideoThumbnail(url: item.url)
+                }
             }
         }
         .buttonStyle(.plain)

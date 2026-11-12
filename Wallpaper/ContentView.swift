@@ -96,7 +96,7 @@ struct ContentView: View {
                         sectionView
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .frame(minWidth: 980, minHeight: 640)
@@ -211,6 +211,7 @@ struct ContentView: View {
                         .padding(.horizontal, 14).padding(.vertical, 10)
                         .background(section == item ? Color.accentColor.opacity(0.18) : .clear,
                                     in: RoundedRectangle(cornerRadius: 9))
+                        .contentShape(RoundedRectangle(cornerRadius: 9))
                 }
                 .buttonStyle(.plain)
             }
@@ -237,9 +238,9 @@ struct ContentView: View {
             Spacer()
             if section == .library && detailID == nil {
                 HStack(spacing: 2) {
-                    Button { isGrid = true } label: { Image(systemName: "square.grid.2x2") }
+                    Button { isGrid = true } label: { Image(systemName: "square.grid.2x2").frame(width: 32, height: 32).contentShape(Rectangle()) }
                         .help("Grid view")
-                    Button { isGrid = false } label: { Image(systemName: "rectangle.grid.1x2") }
+                    Button { isGrid = false } label: { Image(systemName: "rectangle.grid.1x2").frame(width: 32, height: 32).contentShape(Rectangle()) }
                         .help("List view")
                     Menu {
                         ForEach(BrowseFilter.allCases) { filter in
@@ -250,12 +251,12 @@ struct ContentView: View {
                                 else { Text(filter.rawValue) }
                             }
                         }
-                    } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+                    } label: { Image(systemName: "line.3.horizontal.decrease.circle").frame(width: 32, height: 32).contentShape(Rectangle()) }
                         .help("Filter: \(browseFilter.rawValue)")
                     Menu {
                         Button("Recently added") { sortByName = false }
                         Button("Name") { sortByName = true }
-                    } label: { Image(systemName: "arrow.up.arrow.down") }
+                    } label: { Image(systemName: "arrow.up.arrow.down").frame(width: 32, height: 32).contentShape(Rectangle()) }
                 }
                 .buttonStyle(.borderless)
                 .padding(7)
@@ -302,6 +303,7 @@ struct ContentView: View {
                     .padding(24)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .overlay {
                 if libraryItems.isEmpty {
                     ContentUnavailableView.search(text: searchText)
@@ -354,15 +356,9 @@ struct ContentView: View {
     private func communityTile(_ item: CommunityWallpaper) -> some View {
         Button { download(item) } label: {
             CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
-                .overlay(alignment: .bottomLeading) {
-                    Text(item.title)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.ultraThinMaterial)
-                }
+                .overlay(alignment: .bottomLeading) { wallpaperTileTitle(item.title) }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
         .disabled(isDownloading)
@@ -371,7 +367,6 @@ struct ContentView: View {
     private var uploadView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Your uploads").font(.title.bold())
                 Text("Uploading a video adds a local copy to Library and shares it with everyone in Discover.")
                     .foregroundStyle(.secondary)
                 if let session = communityAuth.session {
@@ -427,7 +422,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(24)
         }
     }
@@ -529,17 +524,24 @@ struct ContentView: View {
     private func wallpaperTile(_ item: WallpaperItem) -> some View {
         Button { openDetail(item) } label: {
             VideoThumbnail(url: item.url)
-                .overlay(alignment: .bottomLeading) {
-                    Text(item.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.ultraThinMaterial)
-                }
+                .overlay(alignment: .bottomLeading) { wallpaperTileTitle(item.name) }
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+    }
+
+    private func wallpaperTileTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .padding(.top, 26)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(LinearGradient(colors: [.clear, .black.opacity(0.72)],
+                                       startPoint: .top, endPoint: .bottom))
     }
 
     private func detailView(_ item: WallpaperItem) -> some View {

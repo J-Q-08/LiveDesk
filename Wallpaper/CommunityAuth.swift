@@ -11,6 +11,11 @@ struct CommunitySession: Codable, Sendable {
 }
 
 @MainActor final class CommunityAuth: ObservableObject {
+    struct PublishingAccount: Equatable {
+        let userID: String
+        fileprivate let generation: Int
+    }
+
     static let shared = CommunityAuth()
     @Published private(set) var session: CommunitySession?
     @Published private(set) var restoreError: String?
@@ -76,6 +81,18 @@ struct CommunitySession: Codable, Sendable {
             throw AuthError.sessionChanged
         }
         return refreshed
+    }
+
+    func publishingAccount() throws -> PublishingAccount {
+        guard !isSigningOut, let session else { throw AuthError.signInRequired }
+        return PublishingAccount(userID: session.userID, generation: restoreGeneration)
+    }
+
+    func validSession(for account: PublishingAccount) async throws -> CommunitySession {
+        guard try publishingAccount() == account else { throw AuthError.sessionChanged }
+        let current = try await validSession()
+        guard try publishingAccount() == account else { throw AuthError.sessionChanged }
+        return current
     }
 
     private func refreshSession(_ current: CommunitySession, generation: Int) async throws -> CommunitySession {

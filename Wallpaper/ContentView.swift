@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var showVideoPicker = false
     @State private var showUploadNameSheet = false
     @State private var pendingUploadURL: URL?
+    @State private var pendingUploadAccount: CommunityAuth.PublishingAccount?
     @State private var uploadName = ""
     @State private var isImporting = false
     @State private var library: [LibraryVideo] = []
@@ -174,6 +175,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showUploadNameSheet, onDismiss: {
             pendingUploadURL = nil
+            pendingUploadAccount = nil
             uploadName = ""
         }) {
             VStack(alignment: .leading, spacing: 16) {
@@ -188,10 +190,10 @@ struct ContentView: View {
                     Spacer()
                     Button("Cancel") { showUploadNameSheet = false }
                     Button("Upload and Share") {
-                        guard let url = pendingUploadURL else { return }
+                        guard let url = pendingUploadURL, let account = pendingUploadAccount else { return }
                         let title = uploadName.trimmingCharacters(in: .whitespacesAndNewlines)
                         showUploadNameSheet = false
-                        importAndShare(url: url, title: title)
+                        importAndShare(url: url, title: title, account: account)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(pendingUploadURL == nil || uploadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
@@ -227,7 +229,14 @@ struct ContentView: View {
             Text("This deletes the copy on this Mac. Any original file and shared upload stay available.")
         }
         .confirmationDialog("Share this video with everyone?", isPresented: $confirmingPublicImport) {
-            Button("Choose Video to Share") { showVideoPicker = true }
+            Button("Choose Video to Share") {
+                do {
+                    pendingUploadAccount = try communityAuth.publishingAccount()
+                    showVideoPicker = true
+                } catch {
+                    videoError = error.localizedDescription
+                }
+            }
         } message: {
             Text("The video you choose will be copied to this Mac and uploaded to Discover, where anyone can download it. Share only videos you have the right to publish.")
         }
@@ -896,13 +905,13 @@ struct ContentView: View {
         }
     }
 
-    private func importAndShare(url: URL, title: String) {
+    private func importAndShare(url: URL, title: String, account: CommunityAuth.PublishingAccount) {
         guard !isImporting, !isPublishing, !title.isEmpty, title.count <= 100 else { return }
         isImporting = true
         videoError = nil
         Task {
             do {
-                let session = try await communityAuth.validSession()
+                _ = try await communityAuth.validSession(for: account)
                 let fileExtension = url.pathExtension
                 let video = try await Task.detached(priority: .userInitiated) {
                     try await VideoLibrary.importVideo(from: url, extension: fileExtension, title: title)
@@ -910,11 +919,11 @@ struct ContentView: View {
                 library = try VideoLibrary.load()
                 do {
                     let source = try VideoLibrary.url(for: video)
-                    let item = try await CommunityService.publish(video: video, source: source, session: session)
+                    let item = try await CommunityService.publish(video: video, source: source, account: account)
                     library = try VideoLibrary.markPublished(video, communityID: item.id)
                     videoError = nil
                     await loadCommunity()
-                    await loadMyCloud(userID: session.userID)
+                    await loadMyCloud(userID: account.userID)
                 } catch {
                     videoError = "Saved \(video.name) on this Mac, but sharing failed: \(error.localizedDescription). Retry below."
                 }
@@ -929,6 +938,13 @@ struct ContentView: View {
 
     private func publish(_ video: LibraryVideo) {
         guard !isImporting, !isPublishing else { return }
+        let account: CommunityAuth.PublishingAccount
+        do {
+            account = try communityAuth.publishingAccount()
+        } catch {
+            videoError = error.localizedDescription
+            return
+        }
         isPublishing = true
         videoError = nil
         Task {
@@ -936,11 +952,10 @@ struct ContentView: View {
             do {
                 let source = try VideoLibrary.url(for: video)
                 try await VideoLibrary.validatePlayableVideo(source)
-                let session = try await communityAuth.validSession()
-                let item = try await CommunityService.publish(video: video, source: source, session: session)
+                let item = try await CommunityService.publish(video: video, source: source, account: account)
                 library = try VideoLibrary.markPublished(video, communityID: item.id)
                 await loadCommunity()
-                await loadMyCloud(userID: session.userID)
+                await loadMyCloud(userID: account.userID)
             } catch {
                 videoError = "Couldn’t publish \(video.name): \(error.localizedDescription)"
             }

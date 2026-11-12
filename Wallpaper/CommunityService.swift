@@ -61,7 +61,8 @@ enum CommunityService {
         _ = try await list(limit: 1)
     }
 
-    static func publish(video: LibraryVideo, source: URL, session: CommunitySession) async throws -> CommunityWallpaper {
+    static func publish(video: LibraryVideo, source: URL,
+                        account: CommunityAuth.PublishingAccount) async throws -> CommunityWallpaper {
         let fileExtension = source.pathExtension.lowercased()
         guard ["mp4", "mov", "m4v"].contains(fileExtension) else { throw CommunityError.unsupportedVideo }
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
@@ -69,28 +70,38 @@ enum CommunityService {
         guard fileSize <= VideoLibrary.maxUploadBytes else { throw CommunityError.tooLarge }
         // A local video keeps the same remote identity across retries.
         let id = video.id.uuidString.lowercased()
-        let path = "\(session.userID)/\(id).\(fileExtension)"
-        if let existing = try await publishedItem(id: id) { return existing }
+        let path = "\(account.userID)/\(id).\(fileExtension)"
+        let auth = CommunityAuth.shared
+        _ = try await auth.validSession(for: account)
+        if let existing = try await publishedItem(id: id) {
+            guard existing.videoPath == path else { throw CommunityError.publishedByDifferentAccount }
+            return existing
+        }
         if try await !mediaExists(path: path) {
-            try await upload(source, path: path, mimeType: fileExtension == "mov" ? "video/quicktime" : "video/mp4", token: session.accessToken)
+            let token = try await auth.validSession(for: account).accessToken
+            try await upload(source, path: path, mimeType: fileExtension == "mov" ? "video/quicktime" : "video/mp4", token: token)
         }
         var thumbnailPath: String?
         if let thumbnail = try? await thumbnail(for: source) {
-            let candidate = "\(session.userID)/\(id).png"
+            let candidate = "\(account.userID)/\(id).png"
             if (try? await mediaExists(path: candidate)) == true {
                 thumbnailPath = candidate
-            } else if (try? await upload(thumbnail, path: candidate, mimeType: "image/png", token: session.accessToken)) != nil {
-                thumbnailPath = candidate
+            } else {
+                let token = try await auth.validSession(for: account).accessToken
+                if (try? await upload(thumbnail, path: candidate, mimeType: "image/png", token: token)) != nil {
+                    thumbnailPath = candidate
+                }
             }
         }
+        let token = try await auth.validSession(for: account).accessToken
         var request = URLRequest(url: projectURL.appending(path: "rest/v1/wallpapers"))
         request.httpMethod = "POST"
         request.setValue(publishableKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "id": id, "owner_id": session.userID, "title": String(video.name.prefix(100)),
+            "id": id, "owner_id": account.userID, "title": String(video.name.prefix(100)),
             "video_path": path, "thumbnail_path": thumbnailPath as Any? ?? NSNull(), "file_extension": fileExtension
         ])
         do {
@@ -102,7 +113,7 @@ enum CommunityService {
             return published
         } catch {
             // The insert may have succeeded even if its response never reached this Mac.
-            if let existing = try? await publishedItem(id: id) { return existing }
+            if let existing = try? await publishedItem(id: id), existing.videoPath == path { return existing }
             throw error
         }
     }
@@ -201,12 +212,13 @@ enum CommunityService {
     }
 
     private enum CommunityError: LocalizedError {
-        case invalidResponse, unsupportedVideo, tooLarge, server(Int, String)
+        case invalidResponse, unsupportedVideo, tooLarge, publishedByDifferentAccount, server(Int, String)
         var errorDescription: String? {
             switch self {
             case .invalidResponse: "The community service returned an invalid response."
             case .unsupportedVideo: "Choose an MP4, MOV, or M4V video."
             case .tooLarge: "The community upload limit is 50 MB."
+            case .publishedByDifferentAccount: "This video was already shared from a different account. Sign in to that account to finish the retry."
             case .server(let code, let detail): "Community service error \(code): \(detail)"
             }
         }

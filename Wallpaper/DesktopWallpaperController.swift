@@ -89,7 +89,7 @@ final class DesktopWallpaperController: ObservableObject {
             let previous = desktopPlayers[id]
             window.setFrame(screen.frame, display: true)
             view.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
-                           layout: layout, isPreview: false)
+                           layout: layout, isPreview: false, desktopBackingScale: screen.backingScaleFactor)
             desktopPlayers[id] = playback
             updateDesktopPlayback(playback)
             if previous !== playback { previous?.desktopPlayer.pause() }
@@ -100,7 +100,7 @@ final class DesktopWallpaperController: ObservableObject {
         let videoView = VideoCanvasView(frame: NSRect(origin: .zero, size: screen.frame.size))
         videoView.autoresizingMask = [.width, .height]
         videoView.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
-                            layout: layout, isPreview: false)
+                            layout: layout, isPreview: false, desktopBackingScale: screen.backingScaleFactor)
         window.contentView = videoView
         window.setFrame(screen.frame, display: true)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]

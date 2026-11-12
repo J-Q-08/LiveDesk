@@ -17,6 +17,9 @@ struct ContentView: View {
     @State private var desktopPlayback: VideoPlayback?
     @State private var desktopWindow: NSWindow?
     @State private var showVideoPicker = false
+    @State private var showUploadNameSheet = false
+    @State private var pendingUploadURL: URL?
+    @State private var uploadName = ""
     @State private var isImporting = false
     @State private var selectedVideo: VideoSelection?
     @State private var library: [LibraryVideo] = []
@@ -109,34 +112,43 @@ struct ContentView: View {
         .fileImporter(isPresented: $showVideoPicker, allowedContentTypes: [.movie]) { result in
             switch result {
             case .success(let url):
-                isImporting = true
-                Task {
-                    do {
-                        let session = try await communityAuth.validSession()
-                        let currentLibrary = library
-                        let video = try await Task.detached(priority: .userInitiated) {
-                            try VideoLibrary.importVideo(from: url, existing: currentLibrary)
-                        }.value
-                        library.append(video)
-                        do {
-                            let source = try VideoLibrary.url(for: video)
-                            let item = try await CommunityService.publish(video: video, source: source, session: session)
-                            library = try VideoLibrary.markPublished(video, communityID: item.id, existing: library)
-                            videoError = nil
-                            await loadCommunity()
-                        } catch {
-                            videoError = "Saved \(video.name) on this Mac, but sharing failed: \(error.localizedDescription). Retry below."
-                        }
-                        section = .submissions
-                        detailID = nil
-                    } catch {
-                        videoError = "Couldn’t upload video: \(error.localizedDescription)"
-                    }
-                    isImporting = false
-                }
+                pendingUploadURL = url
+                uploadName = ""
+                showUploadNameSheet = true
             case .failure(let error):
-                videoError = "Couldn’t select a video: \(error.localizedDescription)"
+                if (error as NSError).code != NSUserCancelledError {
+                    videoError = "Couldn’t select a video: \(error.localizedDescription)"
+                }
             }
+        }
+        .sheet(isPresented: $showUploadNameSheet, onDismiss: {
+            pendingUploadURL = nil
+            uploadName = ""
+        }) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Name your wallpaper").font(.title2.bold())
+                Text("This name will appear in your Library and in Discover for everyone.")
+                    .foregroundStyle(.secondary)
+                TextField("Wallpaper name", text: $uploadName)
+                    .textFieldStyle(.roundedBorder)
+                Text("\(uploadName.trimmingCharacters(in: .whitespacesAndNewlines).count)/100 characters")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showUploadNameSheet = false }
+                    Button("Upload and Share") {
+                        guard let url = pendingUploadURL else { return }
+                        let title = uploadName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        showUploadNameSheet = false
+                        importAndShare(url: url, title: title)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pendingUploadURL == nil || uploadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                              uploadName.trimmingCharacters(in: .whitespacesAndNewlines).count > 100)
+                }
+            }
+            .padding(24)
+            .frame(width: 460)
         }
         .confirmationDialog("Remove video from library?", isPresented: Binding(
             get: { videoToDelete != nil },
@@ -263,8 +275,8 @@ struct ContentView: View {
         switch section {
         case .discover:
             discoverView
-        case .submissions:
-            submissionsView
+        case .upload:
+            uploadView
         case .library:
             libraryView
         case .account:
@@ -273,86 +285,90 @@ struct ContentView: View {
     }
 
     private var libraryView: some View {
-        ScrollView {
-            if isGrid {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
-                    ForEach(libraryItems) { item in
+        GeometryReader { geometry in
+            let columnCount = max(1, Int((max(1, geometry.size.width - 48) + 16) / (225 + 16)))
+            ScrollView {
+                if isGrid {
+                    MasonryColumns(items: libraryItems, columnCount: columnCount) { item in
                         wallpaperTile(item)
                     }
-                }
-                .padding(24)
-            } else {
-                LazyVStack(spacing: 12) {
-                    ForEach(libraryItems) { item in
-                        wallpaperTile(item).frame(maxWidth: 520)
+                    .padding(24)
+                } else {
+                    LazyVStack(spacing: 16) {
+                        ForEach(libraryItems) { item in wallpaperTile(item) }
                     }
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(24)
             }
-        }
-        .overlay {
-            if libraryItems.isEmpty {
-                ContentUnavailableView.search(text: searchText)
+            .overlay {
+                if libraryItems.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
             }
         }
     }
 
     private var discoverView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("Community wallpapers").font(.title.bold())
-                Text("Videos shared by the community. Select one to add it to your library.")
-                    .foregroundStyle(.secondary)
-                HStack {
-                    if isLoadingCommunity { ProgressView().controlSize(.small) }
-                    Button("Refresh") { Task { await loadCommunity() } }
-                }
-                if let communityError {
-                    Text(communityError).foregroundStyle(.red)
-                }
-                if communityItems.isEmpty && !isLoadingCommunity && communityError == nil {
-                    ContentUnavailableView("No shared wallpapers yet", systemImage: "globe",
-                                           description: Text("Publish a video from Submissions to make it appear here."))
-                        .frame(maxWidth: .infinity, minHeight: 300)
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
-                        ForEach(communityItems) { item in
-                            Button { download(item) } label: {
-                                VStack(alignment: .leading, spacing: 0) {
-                                    AsyncImage(url: CommunityService.mediaURL(path: item.thumbnailPath)) { image in
-                                        image.resizable().scaledToFill()
-                                    } placeholder: {
-                                        ZStack {
-                                            Color.black
-                                            Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .frame(height: 190).clipped()
-                                    Text(item.title).font(.headline).lineLimit(1).padding(12)
-                                }
-                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
+        GeometryReader { geometry in
+            let columnCount = max(1, Int((max(1, geometry.size.width - 48) + 16) / (225 + 16)))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Community wallpapers").font(.title.bold())
+                            Text("Videos shared by the community. Select one to add it to your Library.")
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if isLoadingCommunity { ProgressView().controlSize(.small) }
+                        Button("Refresh") { Task { await loadCommunity() } }
+                    }
+                    if let communityError {
+                        Text(communityError).foregroundStyle(.red)
+                    }
+                    if communityItems.isEmpty && !isLoadingCommunity && communityError == nil {
+                        ContentUnavailableView("No shared wallpapers yet", systemImage: "globe",
+                                               description: Text("Upload a video to make it appear here."))
+                            .frame(maxWidth: .infinity, minHeight: 300)
+                    } else {
+                        MasonryColumns(items: communityItems, columnCount: columnCount) { item in
+                            communityTile(item)
+                        }
+                        if communityHasMore {
+                            Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
+                                Task { await loadMoreCommunity() }
                             }
-                            .buttonStyle(.plain)
-                            .disabled(isDownloading)
+                            .disabled(isLoadingMoreCommunity)
+                            .frame(maxWidth: .infinity)
                         }
-                    }
-                    if communityHasMore {
-                        Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
-                            Task { await loadMoreCommunity() }
-                        }
-                        .disabled(isLoadingMoreCommunity)
-                        .frame(maxWidth: .infinity)
                     }
                 }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
         }
     }
 
-    private var submissionsView: some View {
+    private func communityTile(_ item: CommunityWallpaper) -> some View {
+        Button { download(item) } label: {
+            CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
+                .overlay(alignment: .bottomLeading) {
+                    Text(item.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDownloading)
+    }
+
+    private var uploadView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Your uploads").font(.title.bold())
@@ -423,9 +439,9 @@ struct ContentView: View {
                 if let session = communityAuth.session {
                     Label("Signed in as \(session.email)", systemImage: "person.crop.circle.fill")
                         .font(.headline)
-                    Text("You can upload and share videos from Submissions. Discover is available to everyone, including people who are signed out.")
+                    Text("You can upload and share videos from the Upload section. Discover is available to everyone, including people who are signed out.")
                         .foregroundStyle(.secondary)
-                    Button("Go to Submissions") { section = .submissions }
+                    Button("Go to Upload") { section = .upload }
                         .buttonStyle(.borderedProminent)
                     Button("Sign Out") {
                         communityAuth.signOut()
@@ -495,11 +511,11 @@ struct ContentView: View {
                 if createAccount {
                     let signedIn = try await communityAuth.signUp(email: email, password: accountPassword)
                     accountMessage = signedIn
-                        ? "Account created. You can now upload from Submissions."
+                        ? "Account created. You can now upload from the Upload section."
                         : "Account created, but sign-in is pending. Check your email, then return here and sign in."
                 } else {
                     try await communityAuth.signIn(email: email, password: accountPassword)
-                    accountMessage = "Signed in. You can now upload from Submissions."
+                    accountMessage = "Signed in. You can now upload from the Upload section."
                 }
             } catch {
                 accountMessage = "Account request failed: \(error.localizedDescription)"
@@ -512,11 +528,8 @@ struct ContentView: View {
 
     private func wallpaperTile(_ item: WallpaperItem) -> some View {
         Button { openDetail(item) } label: {
-            GeometryReader { geometry in
-                ZStack(alignment: .bottomLeading) {
-                    VideoThumbnail(url: item.url)
-                        .frame(width: geometry.size.width, height: 220)
-                        .clipped()
+            VideoThumbnail(url: item.url)
+                .overlay(alignment: .bottomLeading) {
                     Text(item.name)
                         .font(.headline)
                         .lineLimit(1)
@@ -524,10 +537,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(.ultraThinMaterial)
                 }
-                .frame(width: geometry.size.width, height: 220)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-            .frame(height: 220)
         }
         .buttonStyle(.plain)
     }
@@ -588,6 +598,42 @@ struct ContentView: View {
             communityError = "Couldn’t load more wallpapers: \(error.localizedDescription)"
         }
         isLoadingMoreCommunity = false
+    }
+
+    private func importAndShare(url: URL, title: String) {
+        guard !isImporting, !title.isEmpty, title.count <= 100 else { return }
+        guard ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
+            videoError = "Choose an MP4, MOV, or M4V video."
+            return
+        }
+        isImporting = true
+        videoError = nil
+        Task {
+            do {
+                let session = try await communityAuth.validSession()
+                let currentLibrary = library
+                let fileExtension = url.pathExtension
+                let video = try await Task.detached(priority: .userInitiated) {
+                    try VideoLibrary.importVideo(from: url, extension: fileExtension,
+                                                 title: title, existing: currentLibrary)
+                }.value
+                library.append(video)
+                do {
+                    let source = try VideoLibrary.url(for: video)
+                    let item = try await CommunityService.publish(video: video, source: source, session: session)
+                    library = try VideoLibrary.markPublished(video, communityID: item.id, existing: library)
+                    videoError = nil
+                    await loadCommunity()
+                } catch {
+                    videoError = "Saved \(video.name) on this Mac, but sharing failed: \(error.localizedDescription). Retry below."
+                }
+                section = .upload
+                detailID = nil
+            } catch {
+                videoError = "Couldn’t upload video: \(error.localizedDescription)"
+            }
+            isImporting = false
+        }
     }
 
     private func publish(_ video: LibraryVideo) {
@@ -808,7 +854,7 @@ struct ContentView: View {
 
 private enum AppSection: String, CaseIterable, Identifiable {
     case discover = "Discover"
-    case submissions = "Submissions"
+    case upload = "Upload"
     case library = "Library"
     case account = "Account"
 
@@ -817,7 +863,7 @@ private enum AppSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .discover: "star"
-        case .submissions: "cloud"
+        case .upload: "cloud"
         case .library: "books.vertical"
         case .account: "person.crop.circle"
         }
@@ -842,23 +888,85 @@ private struct WallpaperItem: Identifiable {
 private struct VideoThumbnail: View {
     let url: URL
     @State private var image: NSImage?
+    @State private var aspectRatio: CGFloat = 16.0 / 9.0
 
     var body: some View {
-        ZStack {
-            Color.black
-            if let image {
-                Image(nsImage: image).resizable().scaledToFill()
-            } else {
-                Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+                if let image {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
+                }
             }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
         }
-        .clipped()
+        .aspectRatio(aspectRatio, contentMode: .fit)
         .task(id: url) {
             let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
             generator.appliesPreferredTrackTransform = true
             if let frame = try? await generator.image(at: .zero).image {
                 image = NSImage(cgImage: frame, size: .zero)
+                aspectRatio = CGFloat(frame.width) / CGFloat(frame.height)
             }
+        }
+    }
+}
+
+private struct CommunityThumbnail: View {
+    let url: URL?
+    @State private var image: NSImage?
+    @State private var aspectRatio: CGFloat = 16.0 / 9.0
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+                if let image {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "film").font(.largeTitle).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        .aspectRatio(aspectRatio, contentMode: .fit)
+        .task(id: url) {
+            guard let url,
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let image = NSImage(data: data),
+                  image.size.width > 0, image.size.height > 0 else { return }
+            self.image = image
+            aspectRatio = image.size.width / image.size.height
+        }
+    }
+}
+
+private struct MasonryColumns<Item: Identifiable, Tile: View>: View {
+    let items: [Item]
+    let columnCount: Int
+    let tile: (Item) -> Tile
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            ForEach(0..<columnCount, id: \.self) { column in
+                LazyVStack(spacing: 16) {
+                    ForEach(columnItems(column)) { item in
+                        tile(item)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func columnItems(_ column: Int) -> [Item] {
+        items.enumerated().compactMap { index, item in
+            index % columnCount == column ? item : nil
         }
     }
 }

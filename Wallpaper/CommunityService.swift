@@ -147,10 +147,11 @@ enum CommunityService {
         guard ["mp4", "mov", "m4v"].contains(wallpaper.fileExtension.lowercased()),
               let url = mediaURL(path: wallpaper.videoPath) else { throw CommunityError.unsupportedVideo }
         let (temporary, response) = try await URLSession.shared.download(from: url)
+        defer { try? FileManager.default.removeItem(at: temporary) }
         try check(response)
         return try await Task.detached(priority: .userInitiated) {
-            try VideoLibrary.importVideo(from: temporary, extension: wallpaper.fileExtension,
-                                         title: wallpaper.title, communityID: wallpaper.id)
+            try await VideoLibrary.importVideo(from: temporary, extension: wallpaper.fileExtension,
+                                               title: wallpaper.title, communityID: wallpaper.id)
         }.value
     }
 

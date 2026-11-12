@@ -35,24 +35,29 @@ final class VideoPlayback {
 
         do {
             let asset = AVURLAsset(url: url)
-            let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
-            let tracks = try await asset.loadTracks(withMediaType: .video)
-            guard isPlayable, duration.seconds.isFinite, duration.seconds > 0,
-                  let track = tracks.first else {
-                throw PlaybackError.unsupportedVideo
-            }
-            let (naturalSize, transform) = try await track.load(.naturalSize, .preferredTransform)
-            let orientedSize = CGRect(origin: .zero, size: naturalSize).applying(transform).size
-            let videoSize = CGSize(width: abs(orientedSize.width), height: abs(orientedSize.height))
-            guard videoSize.width > 0, videoSize.height > 0 else {
-                throw PlaybackError.unsupportedVideo
-            }
+            let videoSize = try await inspect(asset)
             try Task.checkCancellation()
             return VideoPlayback(asset: asset, sourceURL: url, videoSize: videoSize, scopedURL: scopedURL)
         } catch {
             scopedURL?.stopAccessingSecurityScopedResource()
             throw error
         }
+    }
+
+    nonisolated static func inspect(_ asset: AVURLAsset) async throws -> CGSize {
+        let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        guard isPlayable, duration.seconds.isFinite, duration.seconds > 0,
+              let track = tracks.first else {
+            throw PlaybackError.unsupportedVideo
+        }
+        let (naturalSize, transform) = try await track.load(.naturalSize, .preferredTransform)
+        let orientedSize = CGRect(origin: .zero, size: naturalSize).applying(transform).size
+        let videoSize = CGSize(width: abs(orientedSize.width), height: abs(orientedSize.height))
+        guard videoSize.width > 0, videoSize.height > 0 else {
+            throw PlaybackError.unsupportedVideo
+        }
+        return videoSize
     }
 
     private enum PlaybackError: LocalizedError {

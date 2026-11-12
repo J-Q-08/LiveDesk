@@ -898,10 +898,6 @@ struct ContentView: View {
 
     private func importAndShare(url: URL, title: String) {
         guard !isImporting, !isPublishing, !title.isEmpty, title.count <= 100 else { return }
-        guard ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) else {
-            videoError = "Choose an MP4, MOV, or M4V video."
-            return
-        }
         isImporting = true
         videoError = nil
         Task {
@@ -909,9 +905,7 @@ struct ContentView: View {
                 let session = try await communityAuth.validSession()
                 let fileExtension = url.pathExtension
                 let video = try await Task.detached(priority: .userInitiated) {
-                    try VideoLibrary.validateForUpload(url)
-                    return try VideoLibrary.importVideo(from: url, extension: fileExtension,
-                                                        title: title)
+                    try await VideoLibrary.importVideo(from: url, extension: fileExtension, title: title)
                 }.value
                 library = try VideoLibrary.load()
                 do {
@@ -941,6 +935,7 @@ struct ContentView: View {
             defer { isPublishing = false }
             do {
                 let source = try VideoLibrary.url(for: video)
+                try await VideoLibrary.validatePlayableVideo(source)
                 let session = try await communityAuth.validSession()
                 let item = try await CommunityService.publish(video: video, source: source, session: session)
                 library = try VideoLibrary.markPublished(video, communityID: item.id)
@@ -955,7 +950,7 @@ struct ContentView: View {
     private func download(_ item: CommunityWallpaper) {
         guard downloadingTitle == nil else { return }
         downloadError = nil
-        if let video = library.first(where: { $0.communityID == item.id }) {
+        if let video = library.first(where: { $0.communityID == item.id && (try? VideoLibrary.url(for: $0)) != nil }) {
             section = .library
             openDetail(id: video.id.uuidString)
             return

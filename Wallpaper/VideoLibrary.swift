@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 struct LibraryVideo: Codable, Identifiable, Sendable {
     let id: UUID
@@ -18,20 +19,25 @@ enum VideoLibrary {
     nonisolated static let maxUploadBytes = 52_428_800
     nonisolated private static let indexLock = NSLock()
 
-    nonisolated static func validateForUpload(_ source: URL) throws {
-        guard ["mp4", "mov", "m4v"].contains(source.pathExtension.lowercased()) else {
-            throw UploadError.unsupportedFormat
-        }
-        let hasScopedAccess = source.startAccessingSecurityScopedResource()
-        defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
-        let size = try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber
-        guard let size else { throw UploadError.unreadableFile }
-        guard size.intValue > 0 else { throw UploadError.emptyFile }
-        guard size.intValue <= maxUploadBytes else { throw UploadError.tooLarge }
+    nonisolated private static func validateFileSize(_ file: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              let bytes = attributes[.size] as? NSNumber else { throw ImportError.unreadableFile }
+        guard bytes.int64Value > 0 else { throw ImportError.emptyFile }
+        guard bytes.int64Value <= maxUploadBytes else { throw ImportError.tooLarge }
     }
 
-    private enum UploadError: LocalizedError {
-        case unsupportedFormat, unreadableFile, emptyFile, tooLarge
+    nonisolated static func validatePlayableVideo(_ file: URL) async throws {
+        do {
+            _ = try await VideoPlayback.inspect(AVURLAsset(url: file))
+        } catch {
+            try Task.checkCancellation()
+            throw ImportError.unplayableVideo
+        }
+    }
+
+    private enum ImportError: LocalizedError {
+        case unsupportedFormat, unreadableFile, emptyFile, tooLarge, unplayableVideo
 
         var errorDescription: String? {
             switch self {
@@ -39,6 +45,7 @@ enum VideoLibrary {
             case .unreadableFile: "Couldn’t read the selected video."
             case .emptyFile: "The selected video is empty."
             case .tooLarge: "This video exceeds the 50 MB community upload limit."
+            case .unplayableVideo: "This file isn’t a playable video. It may be damaged or use an unsupported codec."
             }
         }
     }
@@ -75,25 +82,37 @@ enum VideoLibrary {
         return file
     }
 
-    nonisolated static func importVideo(from source: URL) throws -> LibraryVideo {
-        try importVideo(from: source, extension: source.pathExtension,
-                        title: source.deletingPathExtension().lastPathComponent)
-    }
-
     nonisolated static func importVideo(from source: URL, extension fileExtension: String,
                                        title: String,
-                                       communityID: String? = nil) throws -> LibraryVideo {
-        let hasScopedAccess = source.startAccessingSecurityScopedResource()
-        defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
+                                       communityID: String? = nil) async throws -> LibraryVideo {
+        let fileExtension = fileExtension.lowercased()
+        guard ["mp4", "mov", "m4v"].contains(fileExtension) else { throw ImportError.unsupportedFormat }
         let id = UUID()
-        let filename = id.uuidString + "." + fileExtension.lowercased()
+        let filename = id.uuidString + "." + fileExtension
+        let staged = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        defer { try? FileManager.default.removeItem(at: staged) }
+        do {
+            let hasScopedAccess = source.startAccessingSecurityScopedResource()
+            defer { if hasScopedAccess { source.stopAccessingSecurityScopedResource() } }
+            try validateFileSize(source)
+            try FileManager.default.copyItem(at: source, to: staged)
+        }
+        try validateFileSize(staged)
+        try await validatePlayableVideo(staged)
+        try Task.checkCancellation()
         let destination = try directory.appendingPathComponent(filename)
         return try indexLock.withLock {
-            try FileManager.default.copyItem(at: source, to: destination)
+            var items = try loadUnlocked()
+            if let communityID {
+                if let existing = items.first(where: { $0.communityID == communityID && (try? url(for: $0)) != nil }) {
+                    return existing
+                }
+                items.removeAll { $0.communityID == communityID }
+            }
+            let video = LibraryVideo(id: id, name: title, filename: filename, communityID: communityID)
+            try FileManager.default.moveItem(at: staged, to: destination)
             do {
-                let video = LibraryVideo(id: id, name: title, filename: filename,
-                                         communityID: communityID)
-                let data = try JSONEncoder().encode(loadUnlocked() + [video])
+                let data = try JSONEncoder().encode(items + [video])
                 try data.write(to: indexURL, options: .atomic)
                 return video
             } catch {

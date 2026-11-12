@@ -780,9 +780,10 @@ struct ContentView: View {
             communityError = nil
             communityHasMore = false
             communityQuery = query
-        } else if automatically && (isLoadingMoreCommunity || communityItems.count > 50) {
+        } else if automatically && (isLoadingCommunity || isLoadingMoreCommunity) {
             return
         }
+        let previouslyLoadedCount = communityItems.count
         let requestID = UUID()
         communityRequestID = requestID
         isLoadingCommunity = true
@@ -790,11 +791,25 @@ struct ContentView: View {
             if communityRequestID == requestID { isLoadingCommunity = false }
         }
         do {
-            let items = try await CommunityService.list(query: query)
+            var page = try await CommunityService.list(query: query)
             guard !Task.isCancelled, section == .discover, query == searchText,
                   communityRequestID == requestID else { return }
+            if automatically && previouslyLoadedCount > CommunityService.pageSize &&
+                communityItems.prefix(CommunityService.pageSize).elementsEqual(page) {
+                communityError = nil
+                return
+            }
+            var items = page
+            // Keep the loaded range visible and leave it intact if a request fails.
+            while items.count < previouslyLoadedCount, page.count == CommunityService.pageSize,
+                  let cursor = page.last {
+                page = try await CommunityService.list(query: query, after: cursor)
+                guard !Task.isCancelled, section == .discover, query == searchText,
+                      communityRequestID == requestID else { return }
+                items.append(contentsOf: page)
+            }
             communityItems = items
-            communityHasMore = items.count == 50
+            communityHasMore = page.count == CommunityService.pageSize
             communityError = nil
         } catch {
             guard !Task.isCancelled, section == .discover, query == searchText,
@@ -836,9 +851,9 @@ struct ContentView: View {
         do {
             var found: [CommunityWallpaper] = []
             while true {
-                let page = try await CommunityService.list(offset: found.count, ownerID: userID)
+                let page = try await CommunityService.list(after: found.last, ownerID: userID)
                 found.append(contentsOf: page)
-                if page.count < 50 { break }
+                if page.count < CommunityService.pageSize { break }
                 guard cloudRequestID == requestID else { return }
                 try Task.checkCancellation()
             }
@@ -856,18 +871,18 @@ struct ContentView: View {
     }
 
     private func loadMoreCommunity() async {
-        guard !isLoadingCommunity, !isLoadingMoreCommunity, communityHasMore else { return }
+        guard !isLoadingCommunity, !isLoadingMoreCommunity, communityHasMore,
+              let cursor = communityItems.last else { return }
         let query = searchText
-        let offset = communityItems.count
         let requestID = communityRequestID
         isLoadingMoreCommunity = true
         defer { isLoadingMoreCommunity = false }
         do {
-            let next = try await CommunityService.list(query: query, offset: offset)
+            let next = try await CommunityService.list(query: query, after: cursor)
             guard !Task.isCancelled, section == .discover, query == searchText,
                   communityRequestID == requestID else { return }
             communityItems.append(contentsOf: next)
-            communityHasMore = next.count == 50
+            communityHasMore = next.count == CommunityService.pageSize
             communityError = nil
         } catch {
             guard !Task.isCancelled, section == .discover, query == searchText,

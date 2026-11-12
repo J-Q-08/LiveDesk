@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import AppKit
 
-struct CommunityWallpaper: Decodable, Identifiable, Sendable {
+struct CommunityWallpaper: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let title: String
     let createdAt: String
@@ -20,6 +20,7 @@ struct CommunityWallpaper: Decodable, Identifiable, Sendable {
 }
 
 enum CommunityService {
+    nonisolated static let pageSize = 50
     static let projectURL = URL(string: "https://tbhegscgjjaiiwoqooak.supabase.co")!
     static let publishableKey = "sb_publishable_Mza44-XuiiHkBkaVIOqWPg_GgZWfJTe"
     private static let bucket = "wallpapers"
@@ -29,18 +30,25 @@ enum CommunityService {
         return projectURL.appending(path: "storage/v1/object/public/\(bucket)/\(path)")
     }
 
-    static func list(query: String = "", offset: Int = 0, ownerID: String? = nil,
-                     limit: Int = 50) async throws -> [CommunityWallpaper] {
+    static func list(query: String = "", after cursor: CommunityWallpaper? = nil, ownerID: String? = nil,
+                     limit: Int = pageSize) async throws -> [CommunityWallpaper] {
         var components = URLComponents(url: projectURL.appending(path: "rest/v1/wallpapers"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             .init(name: "select", value: "id,title,created_at,video_path,thumbnail_path,file_extension"),
             .init(name: "order", value: "created_at.desc,id.desc"),
-            .init(name: "limit", value: String(limit)),
-            .init(name: "offset", value: String(offset))
+            .init(name: "limit", value: String(limit))
         ]
+        if let cursor {
+            // Match the descending sort order, including uploads with the same timestamp.
+            let older = "created_at.lt.\(cursor.createdAt)"
+            let tied = "and(created_at.eq.\(cursor.createdAt),id.lt.\(cursor.id))"
+            components.queryItems?.append(.init(name: "or", value: "(\(older),\(tied))"))
+        }
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !term.isEmpty { components.queryItems?.append(.init(name: "title", value: "ilike.*\(term)*")) }
         if let ownerID { components.queryItems?.append(.init(name: "owner_id", value: "eq.\(ownerID)")) }
+        // PostgREST decodes a bare plus as a space, including in timestamp offsets.
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         var request = URLRequest(url: components.url!)
         request.setValue(publishableKey, forHTTPHeaderField: "apikey")
         request.timeoutInterval = 10

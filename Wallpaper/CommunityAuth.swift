@@ -17,6 +17,7 @@ struct CommunitySession: Codable, Sendable {
     @Published private(set) var isRestoring = true
     @Published private(set) var isSigningOut = false
     private var restoreGeneration = 0
+    private var refreshRequest: (id: UUID, task: Task<CommunitySession, Error>)?
 
     private init() {
         let generation = restoreGeneration
@@ -56,13 +57,40 @@ struct CommunitySession: Codable, Sendable {
     func validSession() async throws -> CommunitySession {
         guard !isSigningOut, let current = session else { throw AuthError.signInRequired }
         if current.expiresAt > Date().addingTimeInterval(60) { return current }
-        let generation = restoreGeneration
-        let response = try await authRequest(path: "auth/v1/token?grant_type=refresh_token",
-                                             body: ["refresh_token": current.refreshToken])
-        guard session?.refreshToken == current.refreshToken else { throw AuthError.sessionChanged }
-        try await save(response, expectedGeneration: generation)
-        guard let session else { throw AuthError.signInRequired }
-        return session
+        let task: Task<CommunitySession, Error>
+        if let request = refreshRequest {
+            task = request.task
+        } else {
+            let generation = restoreGeneration
+            let id = UUID()
+            task = Task {
+                defer {
+                    if refreshRequest?.id == id { refreshRequest = nil }
+                }
+                return try await refreshSession(current, generation: generation)
+            }
+            refreshRequest = (id, task)
+        }
+        let refreshed = try await task.value
+        guard !isSigningOut, session?.refreshToken == refreshed.refreshToken else {
+            throw AuthError.sessionChanged
+        }
+        return refreshed
+    }
+
+    private func refreshSession(_ current: CommunitySession, generation: Int) async throws -> CommunitySession {
+        do {
+            let response = try await authRequest(path: "auth/v1/token?grant_type=refresh_token",
+                                                 body: ["refresh_token": current.refreshToken])
+            try await save(response, expectedGeneration: generation)
+            guard let session, !isSigningOut else { throw AuthError.signInRequired }
+            return session
+        } catch AuthError.expiredSession {
+            guard restoreGeneration == generation else { throw AuthError.sessionChanged }
+            try await signOut()
+            restoreError = AuthError.expiredSession.errorDescription
+            throw AuthError.expiredSession
+        }
     }
 
     func signOut() async throws {
@@ -70,6 +98,7 @@ struct CommunitySession: Codable, Sendable {
         isSigningOut = true
         defer { isSigningOut = false }
         restoreGeneration += 1
+        refreshRequest = nil
         let status = await KeychainStore.shared.delete()
         guard status == errSecSuccess else { throw AuthError.keychainDelete(status) }
         session = nil
@@ -84,10 +113,18 @@ struct CommunitySession: Codable, Sendable {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 15
         request.setValue(CommunityService.publishableKey, forHTTPHeaderField: "apikey")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
+        if path == "auth/v1/token?grant_type=refresh_token",
+           let http = response as? HTTPURLResponse, (400..<500).contains(http.statusCode),
+           let failure = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let code = (failure["error_code"] as? String) ?? (failure["code"] as? String),
+           Self.expiredSessionCodes.contains(code) {
+            throw AuthError.expiredSession
+        }
         try CommunityService.check(response, data: data)
         return try JSONDecoder().decode(AuthResponse.self, from: data)
     }
@@ -113,6 +150,10 @@ struct CommunitySession: Codable, Sendable {
         restoreError = nil
     }
 
+    private static let expiredSessionCodes: Set<String> = [
+        "refresh_token_not_found", "refresh_token_already_used", "session_expired", "session_not_found"
+    ]
+
     private struct AuthResponse: Decodable {
         let accessToken: String?
         let refreshToken: String?
@@ -131,10 +172,11 @@ struct CommunitySession: Codable, Sendable {
     }
 
     private enum AuthError: LocalizedError {
-        case signInRequired, sessionChanged, invalidResponse, keychain(OSStatus), keychainDelete(OSStatus), keychainVerification
+        case signInRequired, expiredSession, sessionChanged, invalidResponse, keychain(OSStatus), keychainDelete(OSStatus), keychainVerification
         var errorDescription: String? {
             switch self {
             case .signInRequired: "Sign in to publish a video."
+            case .expiredSession: "Your saved sign-in has expired. Sign in again on the Account page."
             case .sessionChanged: "Your account changed during this request. Please try again."
             case .invalidResponse: "The sign-in service returned an invalid response."
             case .keychain(let status): "Couldn’t securely save your sign-in on this Mac (Keychain error \(status))."

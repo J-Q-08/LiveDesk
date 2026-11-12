@@ -28,7 +28,7 @@ struct ContentView: View {
     @State private var displayConfiguration = 0
     @State private var section: AppSection = .discover
     @State private var detailID: String?
-    @State private var searchText = ""
+    @State private var searches: [AppSection: String] = [:]
     @State private var isGrid = true
     @State private var sortByName = false
     @State private var browseFilter: BrowseFilter = .all
@@ -60,6 +60,11 @@ struct ContentView: View {
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
+
+    private var searchText: String { searches[section] ?? "" }
+    private var searchBinding: Binding<String> {
+        Binding(get: { searches[section] ?? "" }, set: { searches[section] = $0 })
+    }
 
     private var allItems: [WallpaperItem] {
         let sample = Bundle.main.url(forResource: "sample", withExtension: "mp4")
@@ -286,9 +291,24 @@ struct ContentView: View {
                 .background(.quaternary.opacity(0.5), in: Capsule())
             }
             if detailID == nil && section != .account {
-                TextField("Search \(section.rawValue)", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
+                HStack(spacing: 4) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search \(section.rawValue)", text: searchBinding)
+                        .textFieldStyle(.plain)
+                    if !searchText.isEmpty {
+                        Button { searches[section] = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear search")
+                    }
+                }
+                .padding(.leading, 9)
+                .padding(.trailing, 4)
+                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                .frame(width: 190)
             }
         }
         .padding(.horizontal, 24)
@@ -354,8 +374,11 @@ struct ContentView: View {
                         Text(communityError).foregroundStyle(.red)
                     }
                     if communityItems.isEmpty && !isLoadingCommunity && communityError == nil {
-                        ContentUnavailableView("No shared wallpapers yet", systemImage: "globe",
-                                               description: Text("Upload a video to make it appear here."))
+                        ContentUnavailableView(searchText.isEmpty ? "No shared wallpapers yet" : "No matching wallpapers",
+                                               systemImage: searchText.isEmpty ? "globe" : "magnifyingglass",
+                                               description: Text(searchText.isEmpty
+                                                                 ? "Upload a video to make it appear here."
+                                                                 : "Try another search term."))
                             .frame(maxWidth: .infinity, minHeight: 300)
                     } else {
                         MasonryColumns(items: communityItems, columnCount: columnCount) { item in
@@ -632,12 +655,16 @@ struct ContentView: View {
     }
 
     private func loadCommunity() async {
+        let query = searchText
         do {
             isLoadingCommunity = true
-            communityItems = try await CommunityService.list(query: searchText)
+            let items = try await CommunityService.list(query: query)
+            guard !Task.isCancelled, section == .discover, query == searchText else { return }
+            communityItems = items
             communityHasMore = communityItems.count == 50
             communityError = nil
         } catch {
+            guard !Task.isCancelled, section == .discover, query == searchText else { return }
             communityError = "Couldn’t load Discover: \(error.localizedDescription)"
         }
         isLoadingCommunity = false
@@ -686,16 +713,20 @@ struct ContentView: View {
 
     private func loadMoreCommunity() async {
         guard !isLoadingMoreCommunity, communityHasMore else { return }
+        let query = searchText
+        let offset = communityItems.count
         isLoadingMoreCommunity = true
+        defer { isLoadingMoreCommunity = false }
         do {
-            let next = try await CommunityService.list(query: searchText, offset: communityItems.count)
+            let next = try await CommunityService.list(query: query, offset: offset)
+            guard !Task.isCancelled, section == .discover, query == searchText else { return }
             communityItems.append(contentsOf: next)
             communityHasMore = next.count == 50
             communityError = nil
         } catch {
+            guard !Task.isCancelled, section == .discover, query == searchText else { return }
             communityError = "Couldn’t load more wallpapers: \(error.localizedDescription)"
         }
-        isLoadingMoreCommunity = false
     }
 
     private func importAndShare(url: URL, title: String) {

@@ -13,17 +13,22 @@ struct CommunitySession: Codable, Sendable {
 @MainActor final class CommunityAuth: ObservableObject {
     static let shared = CommunityAuth()
     @Published private(set) var session: CommunitySession?
-    private let keychainService = "LiveDesk.CommunityAuth"
+    private var restoreGeneration = 0
 
     private init() {
-        guard let data = readKeychain() else { return }
-        session = try? JSONDecoder().decode(CommunitySession.self, from: data)
+        let generation = restoreGeneration
+        Task { [weak self] in
+            let data = await Task.detached(priority: .utility) { KeychainStore.read() }.value
+            let restored = data.flatMap { try? JSONDecoder().decode(CommunitySession.self, from: $0) }
+            guard let self, self.restoreGeneration == generation, self.session == nil else { return }
+            self.session = restored
+        }
     }
 
     func signIn(email: String, password: String) async throws {
         let response = try await authRequest(path: "auth/v1/token?grant_type=password",
                                              body: ["email": email, "password": password])
-        try save(response)
+        try await save(response)
     }
 
     func signUp(email: String, password: String) async throws -> Bool {
@@ -31,7 +36,7 @@ struct CommunitySession: Codable, Sendable {
                                              body: ["email": email, "password": password])
         guard response.user != nil else { throw AuthError.invalidResponse }
         if response.accessToken != nil {
-            try save(response)
+            try await save(response)
             return true
         }
         return false
@@ -42,16 +47,15 @@ struct CommunitySession: Codable, Sendable {
         if current.expiresAt > Date().addingTimeInterval(60) { return current }
         let response = try await authRequest(path: "auth/v1/token?grant_type=refresh_token",
                                              body: ["refresh_token": current.refreshToken])
-        try save(response)
+        try await save(response)
         guard let session else { throw AuthError.signInRequired }
         return session
     }
 
     func signOut() {
+        restoreGeneration += 1
         session = nil
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: keychainService]
-        SecItemDelete(query as CFDictionary)
+        Task.detached(priority: .utility) { KeychainStore.delete() }
     }
 
     private func authRequest(path: String, body: [String: String]) async throws -> AuthResponse {
@@ -69,7 +73,7 @@ struct CommunitySession: Codable, Sendable {
         return try JSONDecoder().decode(AuthResponse.self, from: data)
     }
 
-    private func save(_ response: AuthResponse) throws {
+    private func save(_ response: AuthResponse) async throws {
         guard let accessToken = response.accessToken,
               let refreshToken = response.refreshToken,
               let user = response.user else { throw AuthError.invalidResponse }
@@ -77,26 +81,14 @@ struct CommunitySession: Codable, Sendable {
                                     expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn ?? 3600)),
                                     userID: user.id, email: user.email ?? "")
         let data = try JSONEncoder().encode(next)
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: keychainService]
-        SecItemDelete(query as CFDictionary)
-        var attributes = query
-        attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess else {
+        let status = await Task.detached(priority: .utility) {
+            KeychainStore.write(data)
+        }.value
+        guard status == errSecSuccess else {
             throw AuthError.keychain
         }
+        restoreGeneration += 1
         session = next
-    }
-
-    private func readKeychain() -> Data? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: keychainService,
-                                    kSecReturnData as String: true,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
     }
 
     private struct AuthResponse: Decodable {
@@ -125,5 +117,36 @@ struct CommunitySession: Codable, Sendable {
             case .keychain: "Couldn’t securely save your sign-in on this Mac."
             }
         }
+    }
+}
+
+private enum KeychainStore {
+    nonisolated static let service = "LiveDesk.CommunityAuth.v2"
+
+    nonisolated static func read() -> Data? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    nonisolated static func write(_ data: Data) -> OSStatus {
+        delete()
+        var attributes = baseQuery()
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    nonisolated static func delete() {
+        SecItemDelete(baseQuery() as CFDictionary)
+    }
+
+    nonisolated private static func baseQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecUseDataProtectionKeychain as String: true]
     }
 }

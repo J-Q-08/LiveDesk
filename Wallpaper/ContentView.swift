@@ -35,6 +35,8 @@ struct ContentView: View {
     @State private var videoToDelete: LibraryVideo?
     @State private var confirmingPublicImport = false
     @State private var communityItems: [CommunityWallpaper] = []
+    @State private var communityQuery: String?
+    @State private var communityRequestID: UUID?
     @State private var myCloudItems: [CommunityWallpaper] = []
     @State private var cloudError: String?
     @State private var isLoadingCloud = false
@@ -192,10 +194,11 @@ struct ContentView: View {
         }
         .task(id: "\(section.rawValue)|\(searchText)") {
             guard section == .discover else { return }
+            await loadCommunity(automatically: true)
             while !Task.isCancelled {
-                await loadCommunity()
                 do { try await Task.sleep(for: .seconds(20)) }
                 catch { break }
+                await loadCommunity(automatically: true)
             }
         }
         .task(id: communityAuth.session?.userID) {
@@ -363,10 +366,16 @@ struct ContentView: View {
                         if isLoadingCommunity { ProgressView().controlSize(.small) }
                         Button("Refresh") { Task { await loadCommunity() } }
                     }
-                    if let communityError {
-                        Text(communityError).foregroundStyle(.red)
-                    }
-                    if communityItems.isEmpty && !isLoadingCommunity && communityError == nil {
+                    if let communityError, communityItems.isEmpty, !isLoadingCommunity {
+                        ContentUnavailableView {
+                            Label("Discover is unavailable", systemImage: "wifi.exclamationmark")
+                        } description: {
+                            Text(communityError)
+                        } actions: {
+                            Button("Open Library") { section = .library }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 300)
+                    } else if communityItems.isEmpty && !isLoadingCommunity {
                         ContentUnavailableView(searchText.isEmpty ? "No shared wallpapers yet" : "No matching wallpapers",
                                                systemImage: searchText.isEmpty ? "globe" : "magnifyingglass",
                                                description: Text(searchText.isEmpty
@@ -374,6 +383,9 @@ struct ContentView: View {
                                                                  : "Try another search term."))
                             .frame(maxWidth: .infinity, minHeight: 300)
                     } else {
+                        if let communityError, !communityItems.isEmpty {
+                            Text(communityError).foregroundStyle(.secondary)
+                        }
                         MasonryColumns(items: communityItems, columnCount: columnCount) { item in
                             communityTile(item)
                         }
@@ -381,7 +393,7 @@ struct ContentView: View {
                             Button(isLoadingMoreCommunity ? "Loading…" : "Load More") {
                                 Task { await loadMoreCommunity() }
                             }
-                            .disabled(isLoadingMoreCommunity)
+                            .disabled(isLoadingCommunity || isLoadingMoreCommunity)
                             .frame(maxWidth: .infinity)
                         }
                     }
@@ -680,20 +692,35 @@ struct ContentView: View {
         detailID = id
     }
 
-    private func loadCommunity() async {
+    private func loadCommunity(automatically: Bool = false) async {
+        guard section == .discover, !Task.isCancelled else { return }
         let query = searchText
+        if communityQuery != query {
+            communityItems = []
+            communityError = nil
+            communityHasMore = false
+            communityQuery = query
+        } else if automatically && (isLoadingMoreCommunity || communityItems.count > 50) {
+            return
+        }
+        let requestID = UUID()
+        communityRequestID = requestID
+        isLoadingCommunity = true
+        defer {
+            if communityRequestID == requestID { isLoadingCommunity = false }
+        }
         do {
-            isLoadingCommunity = true
             let items = try await CommunityService.list(query: query)
-            guard !Task.isCancelled, section == .discover, query == searchText else { return }
+            guard !Task.isCancelled, section == .discover, query == searchText,
+                  communityRequestID == requestID else { return }
             communityItems = items
-            communityHasMore = communityItems.count == 50
+            communityHasMore = items.count == 50
             communityError = nil
         } catch {
-            guard !Task.isCancelled, section == .discover, query == searchText else { return }
-            communityError = "Couldn’t load Discover: \(error.localizedDescription)"
+            guard !Task.isCancelled, section == .discover, query == searchText,
+                  communityRequestID == requestID else { return }
+            communityError = "Check your connection and try Refresh. Downloaded wallpapers are still available in Library."
         }
-        isLoadingCommunity = false
     }
 
     private func checkConnection() async {
@@ -738,19 +765,22 @@ struct ContentView: View {
     }
 
     private func loadMoreCommunity() async {
-        guard !isLoadingMoreCommunity, communityHasMore else { return }
+        guard !isLoadingCommunity, !isLoadingMoreCommunity, communityHasMore else { return }
         let query = searchText
         let offset = communityItems.count
+        let requestID = communityRequestID
         isLoadingMoreCommunity = true
         defer { isLoadingMoreCommunity = false }
         do {
             let next = try await CommunityService.list(query: query, offset: offset)
-            guard !Task.isCancelled, section == .discover, query == searchText else { return }
+            guard !Task.isCancelled, section == .discover, query == searchText,
+                  communityRequestID == requestID else { return }
             communityItems.append(contentsOf: next)
             communityHasMore = next.count == 50
             communityError = nil
         } catch {
-            guard !Task.isCancelled, section == .discover, query == searchText else { return }
+            guard !Task.isCancelled, section == .discover, query == searchText,
+                  communityRequestID == requestID else { return }
             communityError = "Couldn’t load more wallpapers: \(error.localizedDescription)"
         }
     }

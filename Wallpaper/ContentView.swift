@@ -14,8 +14,9 @@ import ServiceManagement
 
 struct ContentView: View {
     @State private var playback: VideoPlayback?
-    @State private var desktopPlayback: VideoPlayback?
-    @State private var desktopWindow: NSWindow?
+    @State private var desktopPlayers: [String: VideoPlayback] = [:]
+    @State private var desktopWindows: [String: NSWindow] = [:]
+    @State private var desktopGeneration = 0
     @State private var showVideoPicker = false
     @State private var showUploadNameSheet = false
     @State private var pendingUploadURL: URL?
@@ -114,9 +115,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displayConfiguration += 1
-            guard let window = desktopWindow, let screen = window.screen ?? NSScreen.main else { return }
-            window.setFrame(screen.frame, display: true)
-            (window.contentView as? VideoCanvasView)?.refreshGeometry()
+            syncDesktopDisplays()
         }
         .fileImporter(isPresented: $showVideoPicker, allowedContentTypes: [.movie]) { result in
             switch result {
@@ -892,37 +891,97 @@ struct ContentView: View {
     }
 
     private func applyDesktopBackground(_ newPlayback: VideoPlayback, layout: VideoLayout) {
-        if let videoView = desktopWindow?.contentView as? VideoCanvasView {
-            let previous = desktopPlayback
-            videoView.configure(player: newPlayback.desktopPlayer, videoSize: newPlayback.videoSize,
-                                layout: layout, isPreview: false)
-            desktopPlayback = newPlayback
-            newPlayback.desktopPlayer.play()
-            if previous !== newPlayback { previous?.desktopPlayer.pause() }
+        desktopGeneration += 1
+        let generation = desktopGeneration
+        guard let primary = NSScreen.main ?? NSScreen.screens.first else { return }
+        removeDisconnectedDisplays()
+        installDesktopWindow(on: primary, playback: newPlayback, layout: layout)
+        for screen in NSScreen.screens where screenID(screen) != screenID(primary) {
+            loadDesktopWindow(on: screen, url: newPlayback.sourceURL, layout: layout, generation: generation)
+        }
+    }
+
+    private func screenID(_ screen: NSScreen) -> String {
+        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            return number.stringValue
+        }
+        return "\(screen.frame.origin.x),\(screen.frame.origin.y)"
+    }
+
+    private func installDesktopWindow(on screen: NSScreen, playback: VideoPlayback, layout: VideoLayout) {
+        let id = screenID(screen)
+        if let window = desktopWindows[id], let view = window.contentView as? VideoCanvasView {
+            let previous = desktopPlayers[id]
+            window.setFrame(screen.frame, display: true)
+            view.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
+                           layout: layout, isPreview: false)
+            desktopPlayers[id] = playback
+            playback.desktopPlayer.play()
+            if previous !== playback { previous?.desktopPlayer.pause() }
             return
         }
-        guard let screen = NSScreen.main else { return }
         let window = NSWindow(contentRect: screen.frame, styleMask: .borderless,
                               backing: .buffered, defer: false)
         let videoView = VideoCanvasView(frame: NSRect(origin: .zero, size: screen.frame.size))
         videoView.autoresizingMask = [.width, .height]
-        videoView.configure(player: newPlayback.desktopPlayer, videoSize: newPlayback.videoSize,
+        videoView.configure(player: playback.desktopPlayer, videoSize: playback.videoSize,
                             layout: layout, isPreview: false)
         window.contentView = videoView
         window.setFrame(screen.frame, display: true)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.ignoresMouseEvents = true
         window.hasShadow = false
-        desktopWindow = window
-        desktopPlayback = newPlayback
-        newPlayback.desktopPlayer.play()
+        desktopWindows[id] = window
+        desktopPlayers[id] = playback
+        playback.desktopPlayer.play()
         let iconLevel = CGWindowLevelForKey(.desktopIconWindow)
         window.level = NSWindow.Level(rawValue: Int(iconLevel) - 1)
         window.orderFront(nil)
     }
 
+    private func loadDesktopWindow(on screen: NSScreen, url: URL, layout: VideoLayout, generation: Int) {
+        let id = screenID(screen)
+        Task {
+            do {
+                let player = try await VideoPlayback.load(url, requiresFileAccess: false)
+                guard generation == desktopGeneration,
+                      let connected = NSScreen.screens.first(where: { screenID($0) == id }) else { return }
+                installDesktopWindow(on: connected, playback: player, layout: layout)
+            } catch {
+                guard generation == desktopGeneration else { return }
+                videoError = "Couldn’t play the wallpaper on \(screen.localizedName): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func removeDisconnectedDisplays() {
+        let connected = Set(NSScreen.screens.map(screenID))
+        for id in desktopWindows.keys.filter({ !connected.contains($0) }) {
+            desktopPlayers[id]?.desktopPlayer.pause()
+            desktopWindows[id]?.close()
+            desktopPlayers.removeValue(forKey: id)
+            desktopWindows.removeValue(forKey: id)
+        }
+    }
+
+    private func syncDesktopDisplays() {
+        guard let active = desktopPlayers.values.first else { return }
+        removeDisconnectedDisplays()
+        let layout = VideoLayout(rawValue: appliedVideoLayout) ?? .fill
+        let generation = desktopGeneration
+        for screen in NSScreen.screens {
+            let id = screenID(screen)
+            if let window = desktopWindows[id] {
+                window.setFrame(screen.frame, display: true)
+                (window.contentView as? VideoCanvasView)?.refreshGeometry()
+            } else {
+                loadDesktopWindow(on: screen, url: active.sourceURL, layout: layout, generation: generation)
+            }
+        }
+    }
+
     private func restoreDesktopBackground() async {
-        guard !appliedVideoID.isEmpty, desktopWindow == nil else { return }
+        guard !appliedVideoID.isEmpty, desktopWindows.isEmpty else { return }
         let url: URL?
         if appliedVideoID == "sample" {
             url = Bundle.main.url(forResource: "sample", withExtension: "mp4")
@@ -935,7 +994,7 @@ struct ContentView: View {
         do {
             let restored = try await VideoPlayback.load(url, requiresFileAccess: false)
             try Task.checkCancellation()
-            guard desktopWindow == nil else { return }
+            guard desktopWindows.isEmpty else { return }
             applyDesktopBackground(restored, layout: VideoLayout(rawValue: appliedVideoLayout) ?? .fill)
         } catch {
             videoError = "Couldn’t restore your desktop background: \(error.localizedDescription)"

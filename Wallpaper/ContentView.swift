@@ -519,10 +519,15 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                     Button("Sign Out") {
                         Task {
-                            await communityAuth.signOut()
-                            accountMessage = "Signed out. You can still browse and download from Discover."
+                            do {
+                                try await communityAuth.signOut()
+                                accountMessage = "Signed out. You can still browse and download from Discover."
+                            } catch {
+                                accountMessage = error.localizedDescription
+                            }
                         }
                     }
+                    .disabled(communityAuth.isSigningOut)
                 } else {
                     if communityAuth.isRestoring { ProgressView("Restoring your sign-in…") }
                     if let restoreError = communityAuth.restoreError {

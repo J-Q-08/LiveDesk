@@ -15,6 +15,7 @@ struct CommunitySession: Codable, Sendable {
     @Published private(set) var session: CommunitySession?
     @Published private(set) var restoreError: String?
     @Published private(set) var isRestoring = true
+    @Published private(set) var isSigningOut = false
     private var restoreGeneration = 0
 
     private init() {
@@ -53,7 +54,7 @@ struct CommunitySession: Codable, Sendable {
     }
 
     func validSession() async throws -> CommunitySession {
-        guard let current = session else { throw AuthError.signInRequired }
+        guard !isSigningOut, let current = session else { throw AuthError.signInRequired }
         if current.expiresAt > Date().addingTimeInterval(60) { return current }
         let generation = restoreGeneration
         let response = try await authRequest(path: "auth/v1/token?grant_type=refresh_token",
@@ -64,12 +65,16 @@ struct CommunitySession: Codable, Sendable {
         return session
     }
 
-    func signOut() async {
+    func signOut() async throws {
+        guard !isSigningOut else { return }
+        isSigningOut = true
+        defer { isSigningOut = false }
         restoreGeneration += 1
+        let status = await KeychainStore.shared.delete()
+        guard status == errSecSuccess else { throw AuthError.keychainDelete(status) }
         session = nil
         isRestoring = false
         restoreError = nil
-        await KeychainStore.shared.delete()
     }
 
     private func authRequest(path: String, body: [String: String]) async throws -> AuthResponse {
@@ -126,13 +131,14 @@ struct CommunitySession: Codable, Sendable {
     }
 
     private enum AuthError: LocalizedError {
-        case signInRequired, sessionChanged, invalidResponse, keychain(OSStatus), keychainVerification
+        case signInRequired, sessionChanged, invalidResponse, keychain(OSStatus), keychainDelete(OSStatus), keychainVerification
         var errorDescription: String? {
             switch self {
             case .signInRequired: "Sign in to publish a video."
             case .sessionChanged: "Your account changed during this request. Please try again."
             case .invalidResponse: "The sign-in service returned an invalid response."
             case .keychain(let status): "Couldn’t securely save your sign-in on this Mac (Keychain error \(status))."
+            case .keychainDelete(let status): "Couldn’t remove your saved sign-in (Keychain error \(status)). Try signing out again."
             case .keychainVerification: "Saved sign-in did not match what Keychain returned. Please try again."
             }
         }
@@ -141,10 +147,17 @@ struct CommunitySession: Codable, Sendable {
 
 private actor KeychainStore {
     static let shared = KeychainStore()
-    private let service = "LiveDesk.CommunityAuth.v2"
 
     func read() -> (Data?, OSStatus) {
-        var query = baseQuery()
+        let protected = read(dataProtection: true)
+        guard protected.1 == errSecItemNotFound || protected.1 == errSecMissingEntitlement else {
+            return protected
+        }
+        return read(dataProtection: false)
+    }
+
+    private func read(dataProtection: Bool) -> (Data?, OSStatus) {
+        var query = baseQuery(dataProtection: dataProtection)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -153,26 +166,50 @@ private actor KeychainStore {
     }
 
     func writeAndVerify(_ data: Data) -> (OSStatus, Bool) {
+        let protected = writeAndVerify(data, dataProtection: true)
+        guard protected.0 == errSecMissingEntitlement else { return protected }
+        return writeAndVerify(data, dataProtection: false)
+    }
+
+    private func writeAndVerify(_ data: Data, dataProtection: Bool) -> (OSStatus, Bool) {
+        let query = baseQuery(dataProtection: dataProtection)
         let update: [String: Any] = [kSecValueData as String: data]
-        var status = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
+        var status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
-            var attributes = baseQuery()
+            var attributes = query
             attributes[kSecValueData as String] = data
-            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            if dataProtection {
+                attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            }
             status = SecItemAdd(attributes as CFDictionary, nil)
         }
         guard status == errSecSuccess else { return (status, false) }
-        let (stored, readStatus) = read()
+        let (stored, readStatus) = read(dataProtection: dataProtection)
         return (readStatus, stored == data)
     }
 
-    func delete() {
-        SecItemDelete(baseQuery() as CFDictionary)
+    func delete() -> OSStatus {
+        // Remove the fallback first so a partial failure cannot expose an older session on restore.
+        let fallbackStatus = SecItemDelete(baseQuery(dataProtection: false) as CFDictionary)
+        guard fallbackStatus == errSecSuccess || fallbackStatus == errSecItemNotFound else {
+            return fallbackStatus
+        }
+        let protectedStatus = SecItemDelete(baseQuery(dataProtection: true) as CFDictionary)
+        if protectedStatus == errSecItemNotFound || protectedStatus == errSecMissingEntitlement {
+            return errSecSuccess
+        }
+        return protectedStatus
     }
 
-    private func baseQuery() -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecUseDataProtectionKeychain as String: true]
+    private func baseQuery(dataProtection: Bool) -> [String: Any] {
+        if dataProtection {
+            return [kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: "LiveDesk.CommunityAuth.v2",
+                    kSecUseDataProtectionKeychain as String: true]
+        }
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.jeffrey.Wallpaper"
+        return [kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "\(bundleID).LiveDesk.LoginSession",
+                kSecAttrAccount as String: "session"]
     }
 }

@@ -533,17 +533,28 @@ struct ContentView: View {
 
     private var libraryView: some View {
         GeometryReader { geometry in
-            let columnCount = max(1, Int((max(1, geometry.size.width - 48) + 16) / (220 + 16)))
+            let spacing: CGFloat = 16
+            let availableWidth = max(1, geometry.size.width - 48)
+            let columnCount = max(1, Int((availableWidth + spacing) / (220 + spacing)))
+            let columnWidth = (availableWidth - CGFloat(columnCount - 1) * spacing) / CGFloat(columnCount)
+            let items = libraryItems
             ScrollView {
                 if isGrid {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top),
-                                             count: columnCount), alignment: .leading, spacing: 24) {
-                        ForEach(libraryItems) { item in wallpaperTile(item, previewsOnHover: true) }
+                    HStack(alignment: .top, spacing: spacing) {
+                        ForEach(0..<min(columnCount, items.count), id: \.self) { column in
+                            LazyVStack(spacing: spacing) {
+                                let indices = stride(from: column, to: items.count, by: columnCount)
+                                ForEach(indices.map { items[$0] }) { item in
+                                    wallpaperTile(item, previewsOnHover: true)
+                                }
+                            }
+                            .frame(width: columnWidth)
+                        }
                     }
                     .padding(.horizontal, 24).padding(.bottom, 20)
                 } else {
                     LazyVStack(spacing: 16) {
-                        ForEach(libraryItems) { item in wallpaperTile(item, previewsOnHover: true) }
+                        ForEach(items) { item in wallpaperTile(item, previewsOnHover: true) }
                     }
                     .frame(maxWidth: 520)
                     .frame(maxWidth: .infinity)
@@ -552,7 +563,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .overlay {
-                if libraryItems.isEmpty {
+                if items.isEmpty {
                     ContentUnavailableView.search(text: searchText)
                 }
             }

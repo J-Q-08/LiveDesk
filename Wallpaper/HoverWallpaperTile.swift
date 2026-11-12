@@ -19,21 +19,21 @@ struct HoverWallpaperTile<Artwork: View>: View {
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if isHovered {
-                    Text(title)
-                        .font(.custom("InterVariable", size: 13, relativeTo: .subheadline).weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 26)
-                        .padding([.horizontal, .bottom], 12)
-                        .background {
-                            LinearGradient(colors: [.clear, .black.opacity(0.86)],
-                                           startPoint: .top, endPoint: .bottom)
-                        }
-                        .accessibilityHidden(true)
-                        .allowsHitTesting(false)
-                }
+                Text(title)
+                    .font(.custom("InterVariable", size: 13, relativeTo: .subheadline).weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 26)
+                    .padding([.horizontal, .bottom], 12)
+                    .background {
+                        LinearGradient(colors: [.clear, .black.opacity(0.86)],
+                                       startPoint: .top, endPoint: .bottom)
+                    }
+                    .opacity(isHovered ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.35), value: isHovered)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
             }
             .clipShape(shape)
             .overlay { shape.strokeBorder(GalleryStyle.border).allowsHitTesting(false) }

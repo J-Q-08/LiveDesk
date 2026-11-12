@@ -29,21 +29,28 @@ enum CommunityService {
         return projectURL.appending(path: "storage/v1/object/public/\(bucket)/\(path)")
     }
 
-    static func list(query: String = "", offset: Int = 0) async throws -> [CommunityWallpaper] {
+    static func list(query: String = "", offset: Int = 0, ownerID: String? = nil,
+                     limit: Int = 50) async throws -> [CommunityWallpaper] {
         var components = URLComponents(url: projectURL.appending(path: "rest/v1/wallpapers"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             .init(name: "select", value: "id,title,created_at,video_path,thumbnail_path,file_extension"),
             .init(name: "order", value: "created_at.desc,id.desc"),
-            .init(name: "limit", value: "50"),
+            .init(name: "limit", value: String(limit)),
             .init(name: "offset", value: String(offset))
         ]
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !term.isEmpty { components.queryItems?.append(.init(name: "title", value: "ilike.*\(term)*")) }
+        if let ownerID { components.queryItems?.append(.init(name: "owner_id", value: "eq.\(ownerID)")) }
         var request = URLRequest(url: components.url!)
         request.setValue(publishableKey, forHTTPHeaderField: "apikey")
+        request.timeoutInterval = 10
         let (data, response) = try await URLSession.shared.data(for: request)
         try check(response, data: data)
         return try JSONDecoder().decode([CommunityWallpaper].self, from: data)
+    }
+
+    static func checkConnection() async throws {
+        _ = try await list(limit: 1)
     }
 
     static func publish(video: LibraryVideo, source: URL, session: CommunitySession) async throws -> CommunityWallpaper {

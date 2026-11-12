@@ -35,6 +35,10 @@ struct ContentView: View {
     @State private var videoToDelete: LibraryVideo?
     @State private var confirmingPublicImport = false
     @State private var communityItems: [CommunityWallpaper] = []
+    @State private var myCloudItems: [CommunityWallpaper] = []
+    @State private var cloudError: String?
+    @State private var isLoadingCloud = false
+    @State private var connectionStatus: ConnectionStatus = .checking
     @State private var communityError: String?
     @State private var isLoadingCommunity = false
     @State private var communityHasMore = false
@@ -174,6 +178,21 @@ struct ContentView: View {
                 catch { break }
             }
         }
+        .task(id: communityAuth.session?.userID) {
+            guard let userID = communityAuth.session?.userID else {
+                myCloudItems = []
+                cloudError = nil
+                return
+            }
+            await loadMyCloud(userID: userID)
+        }
+        .task {
+            while !Task.isCancelled {
+                await checkConnection()
+                do { try await Task.sleep(for: .seconds(20)) }
+                catch { break }
+            }
+        }
         .task(id: selectedVideo?.id) {
             previewIsLoading = true
             guard let url = selectedVideo?.url ?? Bundle.main.url(forResource: "sample", withExtension: "mp4") else {
@@ -216,6 +235,10 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
+            Label(connectionStatus.title, systemImage: connectionStatus.icon)
+                .font(.caption)
+                .foregroundStyle(connectionStatus == .connected ? Color.secondary : Color.orange)
+                .help(connectionStatus == .connected ? "Connected to Supabase" : connectionStatus.title)
             Divider()
             Toggle("Launch at Login", isOn: Binding(
                 get: { launchAtLogin },
@@ -369,7 +392,9 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Uploading a video adds a local copy to Library and shares it with everyone in Discover.")
                     .foregroundStyle(.secondary)
-                if let session = communityAuth.session {
+                if communityAuth.isRestoring {
+                    ProgressView("Restoring your sign-in…")
+                } else if let session = communityAuth.session {
                     Label("Signed in as \(session.email)", systemImage: "person.crop.circle.fill")
                         .foregroundStyle(.secondary)
                 } else {
@@ -380,11 +405,35 @@ struct ContentView: View {
                     }
                 }
                 if let videoError { Text(videoError).foregroundStyle(.red) }
+                if let cloudError { Text(cloudError).foregroundStyle(.orange) }
                 Button { confirmingPublicImport = true } label: {
                     Label(isImporting ? "Uploading…" : "Upload and Share Video", systemImage: "square.and.arrow.up")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isImporting || isPublishing || communityAuth.session == nil)
+                if communityAuth.session != nil {
+                    HStack {
+                        Text("Your cloud uploads").font(.headline)
+                        Spacer()
+                        if isLoadingCloud { ProgressView().controlSize(.small) }
+                        Button("Refresh") {
+                            if let userID = communityAuth.session?.userID {
+                                Task { await loadMyCloud(userID: userID) }
+                            }
+                        }
+                    }
+                    if myCloudItems.isEmpty && !isLoadingCloud && cloudError == nil {
+                        Text("No videos uploaded to Supabase yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
+                            ForEach(myCloudItems) { item in communityTile(item) }
+                        }
+                    }
+                    Text("Cloud uploads are available from any Mac. Select one to download a local copy.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("On this Mac").font(.headline)
                 if searchedLibrary.isEmpty {
                     ContentUnavailableView("No uploads yet", systemImage: "film.stack",
                                            description: Text(library.isEmpty
@@ -439,10 +488,16 @@ struct ContentView: View {
                     Button("Go to Upload") { section = .upload }
                         .buttonStyle(.borderedProminent)
                     Button("Sign Out") {
-                        communityAuth.signOut()
-                        accountMessage = "Signed out. You can still browse and download from Discover."
+                        Task {
+                            await communityAuth.signOut()
+                            accountMessage = "Signed out. You can still browse and download from Discover."
+                        }
                     }
                 } else {
+                    if communityAuth.isRestoring { ProgressView("Restoring your sign-in…") }
+                    if let restoreError = communityAuth.restoreError {
+                        Text(restoreError).foregroundStyle(.orange)
+                    }
                     Picker("Account action", selection: $isCreatingAccount) {
                         Text("Sign In").tag(false)
                         Text("Create Account").tag(true)
@@ -468,7 +523,7 @@ struct ContentView: View {
                         authenticate(createAccount: isCreatingAccount)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isAuthenticating)
+                    .disabled(isAuthenticating || communityAuth.isRestoring)
                     if isAuthenticating { ProgressView() }
                 }
                 if let accountMessage {
@@ -588,6 +643,47 @@ struct ContentView: View {
         isLoadingCommunity = false
     }
 
+    private func checkConnection() async {
+        do {
+            try await CommunityService.checkConnection()
+            connectionStatus = .connected
+        } catch {
+            connectionStatus = connectionStatus(for: error)
+        }
+    }
+
+    private func connectionStatus(for error: Error) -> ConnectionStatus {
+        if let urlError = error as? URLError,
+           [.notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+            .cannotConnectToHost, .dnsLookupFailed].contains(urlError.code) {
+            return .offline
+        }
+        return .unavailable
+    }
+
+    private func loadMyCloud(userID: String) async {
+        guard !isLoadingCloud else { return }
+        isLoadingCloud = true
+        defer { isLoadingCloud = false }
+        do {
+            var found: [CommunityWallpaper] = []
+            while true {
+                let page = try await CommunityService.list(offset: found.count, ownerID: userID)
+                found.append(contentsOf: page)
+                if page.count < 50 { break }
+                try Task.checkCancellation()
+            }
+            guard communityAuth.session?.userID == userID else { return }
+            myCloudItems = found
+            cloudError = nil
+            connectionStatus = .connected
+        } catch {
+            guard !Task.isCancelled else { return }
+            cloudError = "Couldn’t load your cloud uploads: \(error.localizedDescription)"
+            connectionStatus = connectionStatus(for: error)
+        }
+    }
+
     private func loadMoreCommunity() async {
         guard !isLoadingMoreCommunity, communityHasMore else { return }
         isLoadingMoreCommunity = true
@@ -626,6 +722,7 @@ struct ContentView: View {
                     library = try VideoLibrary.markPublished(video, communityID: item.id, existing: library)
                     videoError = nil
                     await loadCommunity()
+                    await loadMyCloud(userID: session.userID)
                 } catch {
                     videoError = "Saved \(video.name) on this Mac, but sharing failed: \(error.localizedDescription). Retry below."
                 }
@@ -650,6 +747,7 @@ struct ContentView: View {
                                                          existing: library)
                 communityError = nil
                 await loadCommunity()
+                await loadMyCloud(userID: session.userID)
             } catch {
                 videoError = "Couldn’t publish \(video.name): \(error.localizedDescription)"
             }
@@ -850,6 +948,28 @@ struct ContentView: View {
         } catch {
             loginError = "Couldn’t change launch at login: \(error.localizedDescription)"
             launchAtLogin = SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval
+        }
+    }
+}
+
+private enum ConnectionStatus {
+    case checking, connected, offline, unavailable
+
+    var title: String {
+        switch self {
+        case .checking: "Checking connection…"
+        case .connected: "Connected"
+        case .offline: "Offline — check your internet connection"
+        case .unavailable: "Can’t reach Supabase"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .checking: "network"
+        case .connected: "checkmark.circle.fill"
+        case .offline: "wifi.slash"
+        case .unavailable: "wifi.exclamationmark"
         }
     }
 }

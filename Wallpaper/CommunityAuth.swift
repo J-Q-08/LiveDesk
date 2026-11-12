@@ -13,15 +13,23 @@ struct CommunitySession: Codable, Sendable {
 @MainActor final class CommunityAuth: ObservableObject {
     static let shared = CommunityAuth()
     @Published private(set) var session: CommunitySession?
+    @Published private(set) var restoreError: String?
+    @Published private(set) var isRestoring = true
     private var restoreGeneration = 0
 
     private init() {
         let generation = restoreGeneration
         Task { [weak self] in
-            let data = await Task.detached(priority: .utility) { KeychainStore.read() }.value
+            let (data, status) = await KeychainStore.shared.read()
             let restored = data.flatMap { try? JSONDecoder().decode(CommunitySession.self, from: $0) }
             guard let self, self.restoreGeneration == generation, self.session == nil else { return }
             self.session = restored
+            if status != errSecSuccess && status != errSecItemNotFound {
+                self.restoreError = "Couldn’t restore your saved sign-in (Keychain error \(status)). Sign in again."
+            } else if data != nil && restored == nil {
+                self.restoreError = "Your saved sign-in couldn’t be read. Sign in again."
+            }
+            self.isRestoring = false
         }
     }
 
@@ -52,10 +60,12 @@ struct CommunitySession: Codable, Sendable {
         return session
     }
 
-    func signOut() {
+    func signOut() async {
         restoreGeneration += 1
         session = nil
-        Task.detached(priority: .utility) { KeychainStore.delete() }
+        isRestoring = false
+        restoreError = nil
+        await KeychainStore.shared.delete()
     }
 
     private func authRequest(path: String, body: [String: String]) async throws -> AuthResponse {
@@ -81,14 +91,14 @@ struct CommunitySession: Codable, Sendable {
                                     expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn ?? 3600)),
                                     userID: user.id, email: user.email ?? "")
         let data = try JSONEncoder().encode(next)
-        let status = await Task.detached(priority: .utility) {
-            KeychainStore.write(data)
-        }.value
+        let status = await KeychainStore.shared.write(data)
         guard status == errSecSuccess else {
-            throw AuthError.keychain
+            throw AuthError.keychain(status)
         }
         restoreGeneration += 1
         session = next
+        isRestoring = false
+        restoreError = nil
     }
 
     private struct AuthResponse: Decodable {
@@ -109,42 +119,45 @@ struct CommunitySession: Codable, Sendable {
     }
 
     private enum AuthError: LocalizedError {
-        case signInRequired, invalidResponse, keychain
+        case signInRequired, invalidResponse, keychain(OSStatus)
         var errorDescription: String? {
             switch self {
             case .signInRequired: "Sign in to publish a video."
             case .invalidResponse: "The sign-in service returned an invalid response."
-            case .keychain: "Couldn’t securely save your sign-in on this Mac."
+            case .keychain(let status): "Couldn’t securely save your sign-in on this Mac (Keychain error \(status))."
             }
         }
     }
 }
 
-private enum KeychainStore {
-    nonisolated static let service = "LiveDesk.CommunityAuth.v2"
+private actor KeychainStore {
+    static let shared = KeychainStore()
+    private let service = "LiveDesk.CommunityAuth.v2"
 
-    nonisolated static func read() -> Data? {
+    func read() -> (Data?, OSStatus) {
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return (result as? Data, status)
     }
 
-    nonisolated static func write(_ data: Data) -> OSStatus {
-        delete()
+    func write(_ data: Data) -> OSStatus {
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
+        if status != errSecItemNotFound { return status }
         var attributes = baseQuery()
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(attributes as CFDictionary, nil)
     }
 
-    nonisolated static func delete() {
+    func delete() {
         SecItemDelete(baseQuery() as CFDictionary)
     }
 
-    nonisolated private static func baseQuery() -> [String: Any] {
+    private func baseQuery() -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecUseDataProtectionKeychain as String: true]

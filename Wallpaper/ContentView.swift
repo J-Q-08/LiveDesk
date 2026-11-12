@@ -44,7 +44,8 @@ struct ContentView: View {
     @State private var communityHasMore = false
     @State private var isLoadingMoreCommunity = false
     @State private var isPublishing = false
-    @State private var isDownloading = false
+    @State private var downloadingTitle: String?
+    @State private var downloadError: String?
     @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
@@ -97,6 +98,23 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 toolbar
                 Divider()
+                if let downloadingTitle {
+                    ProgressView("Downloading \(downloadingTitle)…")
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 8)
+                }
+                if let downloadError {
+                    HStack {
+                        Label(downloadError, systemImage: "exclamationmark.circle")
+                        Spacer()
+                        Button("Dismiss") { self.downloadError = nil }
+                    }
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 8)
+                }
                 Group {
                     if let detailID, let item = allItems.first(where: { $0.id == detailID }) {
                         detailView(item)
@@ -382,7 +400,7 @@ struct ContentView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-        .disabled(isDownloading)
+        .disabled(downloadingTitle != nil)
     }
 
     private var uploadView: some View {
@@ -794,24 +812,27 @@ struct ContentView: View {
     }
 
     private func download(_ item: CommunityWallpaper) {
-        guard !isDownloading else { return }
+        guard downloadingTitle == nil else { return }
+        downloadError = nil
         if let video = library.first(where: { $0.communityID == item.id }) {
             section = .library
             openDetail(id: video.id.uuidString)
             return
         }
-        isDownloading = true
+        let sourceSection = section
+        downloadingTitle = item.title
         Task {
+            defer { downloadingTitle = nil }
             do {
                 let video = try await CommunityService.download(wallpaper: item)
                 library = try VideoLibrary.load()
-                section = .library
-                openDetail(id: video.id.uuidString)
-                communityError = nil
+                if section == sourceSection, detailID == nil {
+                    section = .library
+                    openDetail(id: video.id.uuidString)
+                }
             } catch {
-                communityError = "Couldn’t download \(item.title): \(error.localizedDescription)"
+                downloadError = "Couldn’t download \(item.title): \(error.localizedDescription)"
             }
-            isDownloading = false
         }
     }
 

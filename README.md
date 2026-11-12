@@ -7,3 +7,13 @@ To upload a custom video, create an account or sign in on the **Account** page, 
 Open `Wallpaper.xcodeproj` in Xcode and run the Wallpaper scheme. Community metadata is in the Supabase `public.wallpapers` table, and media is in the public `wallpapers` Storage bucket. The schema and row-level security policies are in `supabase/migrations/`. The app contains a publishable key only; it never contains a service role or secret key. Authentication sessions are kept in the macOS data protection Keychain. Existing prototype users may need to sign in once after upgrading from the earlier Keychain entry. The current community upload limit is 50 MB per video; files are checked before being copied into the local Library.
 
 The desktop wallpaper and Lock Screen support remain experimental and need validation across macOS versions and multiple displays.
+
+## Release verification
+
+Run these checks on the candidate build and record the macOS version, display setup, and build commit with the results.
+
+1. With a fresh Library and no account, download a Discover wallpaper. Confirm the preview opens, then quit and reopen the app and play the downloaded video from Library.
+2. Sign in with a test account, quit and reopen, and verify the session is restored. Publish a video you have permission to share. On a second Mac, confirm the account lists it under Your cloud uploads and a guest can find and download it in Discover.
+3. Disconnect the test Mac from the network. Confirm the sidebar reports the connection problem and downloaded Library videos still play. Reconnect and verify Discover refreshes. In a test backend, interrupt publishing after the media upload and retry. Verify there is one catalog entry for the video.
+4. Apply a wallpaper, quit and reopen, and confirm playback resumes on the desktop. Repeat with two displays, then disconnect and reconnect the external display. Verify the video remains behind desktop icons across Spaces.
+5. Verify launch at login from an installed build. Before distributing, validate signing, notarization, and first launch on a Mac without the development build or existing app data.

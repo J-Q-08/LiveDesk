@@ -105,6 +105,7 @@ final class DesktopWallpaperController: ObservableObject {
         window.setFrame(screen.frame, display: true)
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isReleasedWhenClosed = false
+        window.isExcludedFromWindowsMenu = true
         window.ignoresMouseEvents = true
         window.hasShadow = false
         desktopWindows[id] = window
@@ -159,29 +160,25 @@ final class DesktopWallpaperController: ObservableObject {
         }
     }
 
-    func restoreIfNeeded(from library: [LibraryVideo]) {
+    func restoreIfNeeded() {
         guard !didRestore else { return }
         didRestore = true
         guard !appliedVideoID.isEmpty else { return }
-        Task { await restore(from: library) }
+        Task { await restore() }
     }
 
-    private func restore(from library: [LibraryVideo]) async {
+    private func restore() async {
         guard !appliedVideoID.isEmpty, desktopTarget == nil else { return }
         let generation = desktopGeneration
-        let url: URL?
-        if appliedVideoID == "sample" {
-            url = Bundle.main.url(forResource: "sample", withExtension: "mp4")
-        } else if let video = library.first(where: { $0.id.uuidString == appliedVideoID }) {
-            url = try? VideoLibrary.url(for: video)
-        } else {
-            url = nil
-        }
-        guard let url else {
-            error = "The saved wallpaper file is missing."
-            return
-        }
         do {
+            let url: URL?
+            if appliedVideoID == "sample" {
+                url = Bundle.main.url(forResource: "sample", withExtension: "mp4")
+            } else {
+                let video = try VideoLibrary.load().first { $0.id.uuidString == appliedVideoID }
+                url = try video.map { try VideoLibrary.url(for: $0) }
+            }
+            guard let url else { throw CocoaError(.fileNoSuchFile) }
             let restored = try await VideoPlayback.load(url, requiresFileAccess: false)
             try Task.checkCancellation()
             guard generation == desktopGeneration else { return }

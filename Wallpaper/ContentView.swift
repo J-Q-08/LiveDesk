@@ -1005,7 +1005,6 @@ struct ContentView: View {
         do {
             library = try VideoLibrary.load()
             configureLoginItem()
-            desktop.restoreIfNeeded(from: library)
         } catch {
             libraryError = "Couldn’t load your video library: \(error.localizedDescription)"
         }

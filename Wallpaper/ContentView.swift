@@ -28,9 +28,12 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var isGrid = true
     @State private var sortByName = false
+    @State private var browseFilter: BrowseFilter = .all
+    @State private var videoToDelete: LibraryVideo?
     @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
+    @State private var previewIsLoading = false
     @AppStorage("selectedLibraryVideoID") private var selectedLibraryVideoID = ""
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
@@ -40,17 +43,29 @@ struct ContentView: View {
         library.first(where: { $0.id.uuidString == selectedLibraryVideoID })?.name ?? "Sample video"
     }
 
-    private var browseItems: [WallpaperItem] {
+    private var allItems: [WallpaperItem] {
         let sample = Bundle.main.url(forResource: "sample", withExtension: "mp4")
             .map { [WallpaperItem(id: "sample", name: "Sample video", url: $0)] } ?? []
         let imports = library.compactMap { video -> WallpaperItem? in
             guard let url = try? VideoLibrary.url(for: video) else { return nil }
             return WallpaperItem(id: video.id.uuidString, name: video.name, url: url)
         }
-        let items = (sample + imports).filter {
-            searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText)
+        return sample + imports
+    }
+
+    private var browseItems: [WallpaperItem] {
+        let items = allItems.filter { item in
+            (searchText.isEmpty || item.name.localizedCaseInsensitiveContains(searchText)) &&
+            (browseFilter == .all ||
+             (browseFilter == .imports && item.id != "sample") ||
+             (browseFilter == .sample && item.id == "sample") ||
+             (browseFilter == .active && item.id == appliedVideoID))
         }
         return sortByName ? items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending } : items
+    }
+
+    private var searchedLibrary: [LibraryVideo] {
+        library.filter { searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText) }
     }
 
     var body: some View {
@@ -61,7 +76,7 @@ struct ContentView: View {
                 toolbar
                 Divider()
                 Group {
-                    if let detailID, let item = browseItems.first(where: { $0.id == detailID }) {
+                    if let detailID, let item = allItems.first(where: { $0.id == detailID }) {
                         detailView(item)
                     } else {
                         sectionView
@@ -71,7 +86,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 640)
-        .onAppear { loadLibrary() }
+        .onAppear {
+            loadLibrary()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displayConfiguration += 1
             guard let window = desktopWindow, let screen = window.screen ?? NSScreen.main else { return }
@@ -101,9 +118,22 @@ struct ContentView: View {
                 videoError = "Couldn’t select a video: \(error.localizedDescription)"
             }
         }
+        .confirmationDialog("Remove video from library?", isPresented: Binding(
+            get: { videoToDelete != nil },
+            set: { if !$0 { videoToDelete = nil } }
+        )) {
+            Button("Remove Video", role: .destructive) {
+                if let videoToDelete { removeVideo(videoToDelete) }
+                videoToDelete = nil
+            }
+        } message: {
+            Text("The imported copy will be deleted. Your original file will stay where it is.")
+        }
         .task(id: selectedVideo?.id) {
+            previewIsLoading = true
             guard let url = selectedVideo?.url ?? Bundle.main.url(forResource: "sample", withExtension: "mp4") else {
                 videoError = "Couldn’t find the bundled sample. Import a video to play."
+                previewIsLoading = false
                 return
             }
             do {
@@ -114,9 +144,11 @@ struct ContentView: View {
                 videoError = nil
                 next.previewPlayer.play()
                 previous?.previewPlayer.pause()
+                previewIsLoading = false
             } catch {
                 guard !Task.isCancelled else { return }
                 videoError = "Couldn’t play \(url.lastPathComponent): \(error.localizedDescription)"
+                previewIsLoading = false
             }
         }
     }
@@ -161,7 +193,7 @@ struct ContentView: View {
             Button {
                 showVideoPicker = true
             } label: {
-                Label(isImporting ? "Importing…" : "Create", systemImage: "plus")
+                Label(isImporting ? "Importing…" : "Import Video", systemImage: "plus")
             }
             .disabled(isImporting)
             .buttonStyle(.bordered)
@@ -172,8 +204,16 @@ struct ContentView: View {
                     Button { isGrid = false } label: { Image(systemName: "rectangle.grid.1x2") }
                         .help("List view")
                     Menu {
-                        Button("All videos") { }
+                        ForEach(BrowseFilter.allCases) { filter in
+                            Button {
+                                browseFilter = filter
+                            } label: {
+                                if browseFilter == filter { Label(filter.rawValue, systemImage: "checkmark") }
+                                else { Text(filter.rawValue) }
+                            }
+                        }
                     } label: { Image(systemName: "line.3.horizontal.decrease.circle") }
+                        .help("Filter: \(browseFilter.rawValue)")
                     Menu {
                         Button("Recently added") { sortByName = false }
                         Button("Name") { sortByName = true }
@@ -183,9 +223,11 @@ struct ContentView: View {
                 .padding(7)
                 .background(.quaternary.opacity(0.5), in: Capsule())
             }
-            TextField("Search", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 170)
+            if detailID == nil {
+                TextField("Search \(section.rawValue)", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 190)
+            }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -194,17 +236,11 @@ struct ContentView: View {
     @ViewBuilder private var sectionView: some View {
         switch section {
         case .discover:
-            Color.clear
+            discoverView
         case .browse:
             browseView
         case .submissions:
-            VStack(spacing: 14) {
-                Image(systemName: "square.and.arrow.up").font(.system(size: 44)).foregroundStyle(.secondary)
-                Text("Your submissions").font(.title2.bold())
-                Text("Import a video to add it to your local collection.").foregroundStyle(.secondary)
-                Button("Import Video…") { showVideoPicker = true }
-                    .buttonStyle(.borderedProminent).disabled(isImporting)
-            }
+            submissionsView
         case .library:
             libraryView
         }
@@ -233,6 +269,72 @@ struct ContentView: View {
             if browseItems.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             }
+        }
+    }
+
+    private var discoverView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Discover your collection").font(.title.bold())
+                Text("Start with the sample or revisit a video you imported recently.")
+                    .foregroundStyle(.secondary)
+                if let sample = allItems.first(where: { $0.id == "sample" }),
+                   searchText.isEmpty || "Sample video".localizedCaseInsensitiveContains(searchText) {
+                    Text("Start here").font(.headline)
+                    wallpaperTile(sample).frame(maxWidth: 400)
+                }
+                if !searchedLibrary.isEmpty {
+                    Text("Recently imported").font(.headline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
+                        ForEach(Array(allItems.filter {
+                            $0.id != "sample" && (searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText))
+                        }.reversed().prefix(6))) { item in
+                            wallpaperTile(item)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(24)
+        }
+    }
+
+    private var submissionsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Your imported videos").font(.title.bold())
+                Text("These videos are stored on this Mac. Open one to preview it, or remove its stored copy from the menu.")
+                    .foregroundStyle(.secondary)
+                Button { showVideoPicker = true } label: {
+                    Label("Import Video", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isImporting)
+                if searchedLibrary.isEmpty {
+                    ContentUnavailableView("No imported videos", systemImage: "film.stack",
+                                           description: Text(library.isEmpty
+                                                             ? "Import a video to add it to your collection."
+                                                             : "No imported videos match your search."))
+                        .frame(maxWidth: .infinity, minHeight: 300)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 16)], spacing: 16) {
+                        ForEach(searchedLibrary) { video in
+                            if let item = allItems.first(where: { $0.id == video.id.uuidString }) {
+                                wallpaperTile(item)
+                                    .contextMenu {
+                                        Button("Open Preview") { openDetail(item) }
+                                        Button("Remove from Library", role: .destructive) {
+                                            videoToDelete = video
+                                        }
+                                        .disabled(appliedVideoID == video.id.uuidString)
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(24)
         }
     }
 
@@ -279,8 +381,6 @@ struct ContentView: View {
                 Button("Set as Desktop Background") { setDesktopBackground() }
                     .buttonStyle(.borderedProminent).disabled(playback == nil)
             }
-            Text("macOS does not support third-party video playback on the Lock Screen. Export a still frame to use in Wallpaper settings.")
-                .font(.caption).foregroundStyle(.secondary)
             if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
         }
         .padding(24)
@@ -293,9 +393,13 @@ struct ContentView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         libraryRow("Sample video", selected: selectedLibraryVideoID.isEmpty) { selectSample() }
-                        ForEach(library) { video in
+                        ForEach(searchedLibrary) { video in
                             libraryRow(video.name, selected: selectedLibraryVideoID == video.id.uuidString) {
                                 select(video)
+                            }
+                            .contextMenu {
+                                Button("Remove from Library", role: .destructive) { videoToDelete = video }
+                                    .disabled(appliedVideoID == video.id.uuidString)
                             }
                         }
                     }
@@ -319,7 +423,7 @@ struct ContentView: View {
                 Button("Set as Desktop Background") { setDesktopBackground() }
                     .buttonStyle(.borderedProminent).disabled(playback == nil)
                 Button("Export Still Image…") { exportStillImage() }
-                if desktopWindow != nil {
+                    if desktopWindow != nil {
                     Text("Video wallpaper is active on your desktop.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -334,6 +438,24 @@ struct ContentView: View {
         if item.id == "sample" { selectSample() }
         else if let video = library.first(where: { $0.id.uuidString == item.id }) { select(video) }
         detailID = item.id
+    }
+
+    private func removeVideo(_ video: LibraryVideo) {
+        guard appliedVideoID != video.id.uuidString else {
+            videoError = "Change the active desktop wallpaper before removing this video."
+            return
+        }
+        do {
+            try VideoLibrary.remove(video, existing: library)
+            library.removeAll { $0.id == video.id }
+            if selectedLibraryVideoID == video.id.uuidString {
+                selectSample()
+                detailID = nil
+            }
+            videoError = nil
+        } catch {
+            videoError = "Couldn’t remove \(video.name): \(error.localizedDescription)"
+        }
     }
 
     private func libraryRow(_ name: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -371,16 +493,19 @@ struct ContentView: View {
     }
 
     private func selectSample() {
+        previewIsLoading = true
         selectedLibraryVideoID = ""
         selectedVideo = nil
     }
 
     private func select(_ video: LibraryVideo) {
         do {
+            previewIsLoading = true
             selectedVideo = VideoSelection(url: try VideoLibrary.url(for: video))
             selectedLibraryVideoID = video.id.uuidString
             videoError = nil
         } catch {
+            previewIsLoading = false
             videoError = "Couldn’t open \(video.name): \(error.localizedDescription)"
         }
     }
@@ -522,6 +647,15 @@ private enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+private enum BrowseFilter: String, CaseIterable, Identifiable {
+    case all = "All videos"
+    case imports = "Imported videos"
+    case sample = "Sample video"
+    case active = "Active wallpaper"
+
+    var id: String { rawValue }
+}
+
 private struct WallpaperItem: Identifiable {
     let id: String
     let name: String
@@ -548,265 +682,6 @@ private struct VideoThumbnail: View {
             if let frame = try? await generator.image(at: .zero).image {
                 image = NSImage(cgImage: frame, size: .zero)
             }
-        }
-    }
-}
-
-private struct LibraryVideo: Codable, Identifiable, Sendable {
-    let id: UUID
-    let name: String
-    let filename: String
-}
-
-private enum VideoLibrary {
-    nonisolated private static var directory: URL {
-        get throws {
-            let support = try FileManager.default.url(for: .applicationSupportDirectory,
-                                                      in: .userDomainMask, appropriateFor: nil, create: true)
-            let directory = support.appendingPathComponent("LiveDesk/Videos", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            return directory
-        }
-    }
-
-    nonisolated private static var indexURL: URL {
-        get throws { try directory.appendingPathComponent("library.json") }
-    }
-
-    nonisolated static func load() throws -> [LibraryVideo] {
-        let index = try indexURL
-        guard FileManager.default.fileExists(atPath: index.path) else { return [] }
-        return try JSONDecoder().decode([LibraryVideo].self, from: Data(contentsOf: index))
-    }
-
-    nonisolated static func url(for video: LibraryVideo) throws -> URL {
-        let file = try directory.appendingPathComponent(video.filename)
-        guard FileManager.default.fileExists(atPath: file.path) else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-        return file
-    }
-
-    nonisolated static func importVideo(from source: URL, existing: [LibraryVideo]) throws -> LibraryVideo {
-        guard source.startAccessingSecurityScopedResource() else {
-            throw CocoaError(.fileReadNoPermission)
-        }
-        defer { source.stopAccessingSecurityScopedResource() }
-        let id = UUID()
-        let filename = id.uuidString + "." + source.pathExtension.lowercased()
-        let destination = try directory.appendingPathComponent(filename)
-        try FileManager.default.copyItem(at: source, to: destination)
-        do {
-            let video = LibraryVideo(id: id, name: source.deletingPathExtension().lastPathComponent,
-                                     filename: filename)
-            let data = try JSONEncoder().encode(existing + [video])
-            try data.write(to: indexURL, options: .atomic)
-            return video
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            throw error
-        }
-    }
-}
-
-private enum VideoLayout: String, CaseIterable, Identifiable {
-    case fit = "Fit"
-    case fill = "Fill"
-    case stretch = "Stretch"
-    case center = "Center"
-    case tile = "Tile"
-
-    var id: String { rawValue }
-}
-
-private struct VideoCanvas: NSViewRepresentable {
-    let player: AVPlayer?
-    let videoSize: CGSize
-    let videoLayout: VideoLayout
-    let isPreview: Bool
-
-    func makeNSView(context: Context) -> VideoCanvasView { VideoCanvasView() }
-
-    func updateNSView(_ view: VideoCanvasView, context: Context) {
-        view.configure(player: player, videoSize: videoSize,
-                       layout: videoLayout, isPreview: isPreview)
-    }
-}
-
-private final class VideoCanvasView: NSView {
-    private let verticalTiles = CAReplicatorLayer()
-    private let horizontalTiles = CAReplicatorLayer()
-    private let videoLayer = AVPlayerLayer()
-    private var videoSize: CGSize = .zero
-    private var videoLayout: VideoLayout = .fill
-    private var isPreview = false
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
-        layer?.masksToBounds = true
-        layer?.addSublayer(verticalTiles)
-        verticalTiles.addSublayer(horizontalTiles)
-        horizontalTiles.addSublayer(videoLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
-
-    func configure(player: AVPlayer?, videoSize: CGSize, layout: VideoLayout, isPreview: Bool) {
-        videoLayer.player = player
-        self.videoSize = videoSize
-        videoLayout = layout
-        self.isPreview = isPreview
-        updateGeometry()
-    }
-
-    override func layout() {
-        super.layout()
-        updateGeometry()
-    }
-
-    func refreshGeometry() { updateGeometry() }
-
-    private func updateGeometry() {
-        guard bounds.width > 0, bounds.height > 0 else { return }
-
-        let screen = window?.screen ?? NSScreen.main
-        let screenSize = screen?.frame.size ?? bounds.size
-        let previewScale = isPreview
-            ? min(bounds.width / screenSize.width, bounds.height / screenSize.height)
-            : 1.0
-        let canvasSize = isPreview
-            ? CGSize(width: screenSize.width * previewScale, height: screenSize.height * previewScale)
-            : bounds.size
-        let canvas = CGRect(x: (bounds.width - canvasSize.width) / 2,
-                            y: (bounds.height - canvasSize.height) / 2,
-                            width: canvasSize.width, height: canvasSize.height)
-        let screenScale = screen?.backingScaleFactor ?? 1.0
-        let tileSize = CGSize(width: videoSize.width / screenScale * previewScale,
-                              height: videoSize.height / screenScale * previewScale)
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        verticalTiles.frame = bounds
-        horizontalTiles.frame = canvas
-        verticalTiles.instanceCount = 1
-        horizontalTiles.instanceCount = 1
-        verticalTiles.instanceTransform = CATransform3DIdentity
-        horizontalTiles.instanceTransform = CATransform3DIdentity
-
-        switch videoLayout {
-        case .fit:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
-            }
-            videoLayer.frame = horizontalTiles.bounds
-            videoLayer.videoGravity = .resizeAspect
-        case .fill:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
-            }
-            videoLayer.frame = horizontalTiles.bounds
-            videoLayer.videoGravity = .resizeAspectFill
-        case .stretch:
-            // Use the view's full bounds so both axes match the display exactly.
-            if videoLayer.superlayer !== layer {
-                layer?.addSublayer(videoLayer)
-            }
-            videoLayer.frame = bounds
-            videoLayer.videoGravity = .resize
-        case .center, .tile:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
-            }
-            guard tileSize.width > 0, tileSize.height > 0 else {
-                videoLayer.frame = .zero
-                CATransaction.commit()
-                return
-            }
-            videoLayer.videoGravity = .resize
-            if videoLayout == .center {
-                videoLayer.frame = CGRect(x: (canvas.width - tileSize.width) / 2,
-                                          y: (canvas.height - tileSize.height) / 2,
-                                          width: tileSize.width, height: tileSize.height)
-            } else {
-                let startX = (canvas.width - tileSize.width) / 2
-                    - ceil(max(0, (canvas.width - tileSize.width) / 2) / tileSize.width) * tileSize.width
-                let startY = (canvas.height - tileSize.height) / 2
-                    - ceil(max(0, (canvas.height - tileSize.height) / 2) / tileSize.height) * tileSize.height
-                videoLayer.frame = CGRect(origin: CGPoint(x: startX, y: startY), size: tileSize)
-                horizontalTiles.instanceCount = max(1, Int(ceil((canvas.width - startX) / tileSize.width)))
-                verticalTiles.instanceCount = max(1, Int(ceil((canvas.height - startY) / tileSize.height)))
-                horizontalTiles.instanceTransform = CATransform3DMakeTranslation(tileSize.width, 0, 0)
-                verticalTiles.instanceTransform = CATransform3DMakeTranslation(0, tileSize.height, 0)
-            }
-        }
-        CATransaction.commit()
-    }
-}
-
-private struct VideoSelection {
-    let id = UUID()
-    let url: URL
-}
-
-private final class VideoPlayback {
-    let id = UUID()
-    let previewPlayer: AVQueuePlayer
-    let desktopPlayer: AVQueuePlayer
-    let videoSize: CGSize
-    private let previewLooper: AVPlayerLooper
-    private let desktopLooper: AVPlayerLooper
-    private let scopedURL: URL?
-
-    private init(asset: AVURLAsset, videoSize: CGSize, scopedURL: URL?) {
-        previewPlayer = AVQueuePlayer()
-        desktopPlayer = AVQueuePlayer()
-        previewPlayer.isMuted = true
-        desktopPlayer.isMuted = true
-        previewLooper = AVPlayerLooper(player: previewPlayer, templateItem: AVPlayerItem(asset: asset))
-        desktopLooper = AVPlayerLooper(player: desktopPlayer, templateItem: AVPlayerItem(asset: asset))
-        self.videoSize = videoSize
-        self.scopedURL = scopedURL
-    }
-
-    deinit {
-        scopedURL?.stopAccessingSecurityScopedResource()
-    }
-
-    static func load(_ url: URL, requiresFileAccess: Bool) async throws -> VideoPlayback {
-        let scopedURL = requiresFileAccess ? url : nil
-        if let scopedURL, !scopedURL.startAccessingSecurityScopedResource() {
-            throw CocoaError(.fileReadNoPermission)
-        }
-
-        do {
-            let asset = AVURLAsset(url: url)
-            let (isPlayable, duration) = try await asset.load(.isPlayable, .duration)
-            let tracks = try await asset.loadTracks(withMediaType: .video)
-            guard isPlayable, duration.seconds.isFinite, duration.seconds > 0,
-                  let track = tracks.first else {
-                throw PlaybackError.unsupportedVideo
-            }
-            let (naturalSize, transform) = try await track.load(.naturalSize, .preferredTransform)
-            let orientedSize = CGRect(origin: .zero, size: naturalSize).applying(transform).size
-            let videoSize = CGSize(width: abs(orientedSize.width), height: abs(orientedSize.height))
-            guard videoSize.width > 0, videoSize.height > 0 else {
-                throw PlaybackError.unsupportedVideo
-            }
-            try Task.checkCancellation()
-            return VideoPlayback(asset: asset, videoSize: videoSize, scopedURL: scopedURL)
-        } catch {
-            scopedURL?.stopAccessingSecurityScopedResource()
-            throw error
-        }
-    }
-
-    private enum PlaybackError: LocalizedError {
-        case unsupportedVideo
-
-        var errorDescription: String? {
-            "Choose a playable video with a video track."
         }
     }
 }

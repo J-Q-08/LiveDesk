@@ -22,7 +22,6 @@ struct ContentView: View {
     @State private var pendingUploadURL: URL?
     @State private var uploadName = ""
     @State private var isImporting = false
-    @State private var selectedVideo: VideoSelection?
     @State private var library: [LibraryVideo] = []
     @State private var videoError: String?
     @State private var videoLayout: VideoLayout = .fill
@@ -49,7 +48,7 @@ struct ContentView: View {
     @State private var didRestoreWallpaper = false
     @State private var launchAtLogin = false
     @State private var loginError: String?
-    @State private var previewIsLoading = false
+    @State private var previewError: String?
     @StateObject private var communityAuth = CommunityAuth.shared
     @State private var accountEmail = ""
     @State private var accountPassword = ""
@@ -57,7 +56,6 @@ struct ContentView: View {
     @State private var accountMessage: String?
     @State private var isAuthenticating = false
     @State private var isCreatingAccount = false
-    @AppStorage("selectedLibraryVideoID") private var selectedLibraryVideoID = ""
     @AppStorage("appliedVideoID") private var appliedVideoID = ""
     @AppStorage("appliedVideoLayout") private var appliedVideoLayout = "Fill"
     @AppStorage("launchAtLoginPreference") private var launchAtLoginPreference = true
@@ -195,28 +193,6 @@ struct ContentView: View {
                 await checkConnection()
                 do { try await Task.sleep(for: .seconds(20)) }
                 catch { break }
-            }
-        }
-        .task(id: selectedVideo?.id) {
-            previewIsLoading = true
-            guard let url = selectedVideo?.url ?? Bundle.main.url(forResource: "sample", withExtension: "mp4") else {
-                videoError = "Couldn’t find the bundled sample. Import a video to play."
-                previewIsLoading = false
-                return
-            }
-            do {
-                let next = try await VideoPlayback.load(url, requiresFileAccess: false)
-                try Task.checkCancellation()
-                let previous = playback
-                playback = next
-                videoError = nil
-                next.previewPlayer.play()
-                previous?.previewPlayer.pause()
-                previewIsLoading = false
-            } catch {
-                guard !Task.isCancelled else { return }
-                videoError = "Couldn’t play \(url.lastPathComponent): \(error.localizedDescription)"
-                previewIsLoading = false
             }
         }
     }
@@ -622,35 +598,68 @@ struct ContentView: View {
     }
 
     private func detailView(_ item: WallpaperItem) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Button { detailID = nil } label: { Label("Back to Library", systemImage: "chevron.left") }
+        let currentPlayback = playback?.sourceURL == item.url ? playback : nil
+        return VStack(alignment: .leading, spacing: 18) {
+            Button { detailID = nil } label: { Label("Back to \(section.rawValue)", systemImage: "chevron.left") }
                 .buttonStyle(.plain)
             Text(item.name).font(.largeTitle.bold())
-            VideoCanvas(player: playback?.previewPlayer, videoSize: playback?.videoSize ?? .zero,
+            VideoCanvas(player: currentPlayback?.previewPlayer, videoSize: currentPlayback?.videoSize ?? .zero,
                         videoLayout: videoLayout, isPreview: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(.black, in: RoundedRectangle(cornerRadius: 12))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-                .id("\(displayConfiguration)-\(playback?.id.uuidString ?? "none")")
+                .id("\(displayConfiguration)-\(currentPlayback?.id.uuidString ?? "none")")
+                .overlay {
+                    if let previewError {
+                        ContentUnavailableView("Preview unavailable", systemImage: "film",
+                                               description: Text(previewError))
+                    } else if currentPlayback == nil {
+                        ProgressView("Loading preview…")
+                    }
+                }
             HStack {
                 Picker("Video layout", selection: $videoLayout) {
                     ForEach(VideoLayout.allCases) { layout in Text(layout.rawValue).tag(layout) }
                 }
                 .frame(maxWidth: 260)
                 Spacer()
-                Button("Export Still Image…") { exportStillImage() }
-                Button("Set as Desktop Background") { setDesktopBackground() }
-                    .buttonStyle(.borderedProminent).disabled(playback == nil)
+                Button("Export Still Image…") { exportStillImage(from: item.url) }
+                    .disabled(currentPlayback == nil)
+                Button("Set as Desktop Background") { setDesktopBackground(item) }
+                    .buttonStyle(.borderedProminent).disabled(currentPlayback == nil)
             }
             if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
         }
         .padding(24)
+        .task(id: item.id) {
+            do {
+                let next = try await VideoPlayback.load(item.url, requiresFileAccess: false)
+                try Task.checkCancellation()
+                guard detailID == item.id else { return }
+                playback?.previewPlayer.pause()
+                playback = next
+                next.previewPlayer.play()
+            } catch {
+                guard !Task.isCancelled, detailID == item.id else { return }
+                previewError = error.localizedDescription
+            }
+        }
+        .onDisappear {
+            playback?.previewPlayer.pause()
+            playback = nil
+        }
     }
 
     private func openDetail(_ item: WallpaperItem) {
-        if item.id == "sample" { selectSample() }
-        else if let video = library.first(where: { $0.id.uuidString == item.id }) { select(video) }
-        detailID = item.id
+        openDetail(id: item.id)
+    }
+
+    private func openDetail(id: String) {
+        playback?.previewPlayer.pause()
+        playback = nil
+        previewError = nil
+        videoError = nil
+        detailID = id
     }
 
     private func loadCommunity() async {
@@ -787,9 +796,8 @@ struct ContentView: View {
     private func download(_ item: CommunityWallpaper) {
         guard !isDownloading else { return }
         if let video = library.first(where: { $0.communityID == item.id }) {
-            select(video)
             section = .library
-            detailID = video.id.uuidString
+            openDetail(id: video.id.uuidString)
             return
         }
         isDownloading = true
@@ -797,9 +805,8 @@ struct ContentView: View {
             do {
                 let video = try await CommunityService.download(wallpaper: item)
                 library = try VideoLibrary.load()
-                select(video)
                 section = .library
-                detailID = video.id.uuidString
+                openDetail(id: video.id.uuidString)
                 communityError = nil
             } catch {
                 communityError = "Couldn’t download \(item.title): \(error.localizedDescription)"
@@ -816,8 +823,7 @@ struct ContentView: View {
         do {
             try VideoLibrary.remove(video)
             library = try VideoLibrary.load()
-            if selectedLibraryVideoID == video.id.uuidString {
-                selectSample()
+            if detailID == video.id.uuidString {
                 detailID = nil
             }
             videoError = nil
@@ -829,11 +835,6 @@ struct ContentView: View {
     private func loadLibrary() {
         do {
             library = try VideoLibrary.load()
-            if let video = library.first(where: { $0.id.uuidString == selectedLibraryVideoID }) {
-                selectedVideo = VideoSelection(url: try VideoLibrary.url(for: video))
-            } else {
-                selectedLibraryVideoID = ""
-            }
             configureLoginItem()
             if !didRestoreWallpaper {
                 didRestoreWallpaper = true
@@ -844,33 +845,14 @@ struct ContentView: View {
         }
     }
 
-    private func selectSample() {
-        previewIsLoading = true
-        selectedLibraryVideoID = ""
-        selectedVideo = nil
-    }
-
-    private func select(_ video: LibraryVideo) {
-        do {
-            previewIsLoading = true
-            selectedVideo = VideoSelection(url: try VideoLibrary.url(for: video))
-            selectedLibraryVideoID = video.id.uuidString
-            videoError = nil
-        } catch {
-            previewIsLoading = false
-            videoError = "Couldn’t open \(video.name): \(error.localizedDescription)"
-        }
-    }
-
-    private func setDesktopBackground() {
-        guard let playback else { return }
+    private func setDesktopBackground(_ item: WallpaperItem) {
+        guard let playback, playback.sourceURL == item.url, detailID == item.id else { return }
         applyDesktopBackground(playback, layout: videoLayout)
-        appliedVideoID = selectedLibraryVideoID.isEmpty ? "sample" : selectedLibraryVideoID
+        appliedVideoID = item.id
         appliedVideoLayout = videoLayout.rawValue
     }
 
-    private func exportStillImage() {
-        guard let url = selectedVideo?.url ?? Bundle.main.url(forResource: "sample", withExtension: "mp4") else { return }
+    private func exportStillImage(from url: URL) {
         Task {
             do {
                 let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))

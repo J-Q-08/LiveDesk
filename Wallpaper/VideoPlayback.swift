@@ -1,11 +1,6 @@
 import Foundation
 import AVFoundation
 
-struct VideoSelection {
-    let id = UUID()
-    let url: URL
-}
-
 final class VideoPlayback {
     let id = UUID()
     let sourceURL: URL

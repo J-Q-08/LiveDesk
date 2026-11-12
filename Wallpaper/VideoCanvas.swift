@@ -59,7 +59,6 @@ final class VideoCanvasView: NSView {
         updateGeometry()
     }
 
-    func refreshGeometry() { updateGeometry() }
 
     private func updateGeometry() {
         guard bounds.width > 0, bounds.height > 0 else { return }

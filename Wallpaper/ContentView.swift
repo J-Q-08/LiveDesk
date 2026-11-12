@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var videoLayout: VideoLayout = .fill
     @State private var displayConfiguration = 0
     @State private var section: AppSection = .discover
+    @State private var isDiscoverExpanded = false
     @State private var browseAllCommunity = false
     @State private var detailID: String?
     @State private var searches: [AppSection: String] = [:]
@@ -281,22 +282,32 @@ struct ContentView: View {
                 sidebarSearch
                     .padding(.bottom, 14)
             }
-            Text("Discover")
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.leading, 9)
-            sidebarRow("Featured", icon: "book", selected: section == .discover && !browseAllCommunity) {
-                showDiscover(browseAll: false)
+            sidebarRow("Discover", icon: AppSection.discover.icon, selected: section == .discover,
+                       disclosure: section == .discover && isDiscoverExpanded) {
+                if section != .discover {
+                    section = .discover
+                    detailID = nil
+                }
+                isDiscoverExpanded = true
             }
-            sidebarRow("Browse All", icon: "square.grid.2x2", selected: section == .discover && browseAllCommunity) {
-                showDiscover(browseAll: true)
+            if section == .discover && isDiscoverExpanded {
+                VStack(spacing: 3) {
+                    sidebarRow("Featured", icon: "book", selected: !browseAllCommunity) {
+                        showDiscover(browseAll: false)
+                    }
+                    sidebarRow("Browse All", icon: "square.grid.2x2", selected: browseAllCommunity) {
+                        showDiscover(browseAll: true)
+                    }
+                }
+                .padding(.leading, 17)
             }
-            Spacer()
-            ForEach([AppSection.library, .upload, .account]) { item in
+            ForEach([AppSection.library, .upload]) { item in
                 sidebarRow(item.rawValue, icon: item.icon, selected: section == item) {
                     section = item
                     detailID = nil
                 }
             }
+            Spacer()
             Divider().padding(.vertical, 4)
             if let error = desktop.error {
                 Text(error).font(.caption).foregroundStyle(.orange)
@@ -340,13 +351,21 @@ struct ContentView: View {
         .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private func sidebarRow(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func sidebarRow(_ title: String, icon: String, selected: Bool, disclosure: Bool? = nil,
+                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
                     .foregroundStyle(selected ? .white : GalleryStyle.accent)
                     .frame(width: 19)
                 Text(title)
+                if let disclosure {
+                    Spacer(minLength: 0)
+                    Image(systemName: disclosure ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
             }
             .font(.system(size: 13, weight: selected ? .semibold : .medium))
             .foregroundStyle(selected ? .white : Color.white.opacity(0.85))
@@ -362,11 +381,13 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(disclosure.map { $0 ? "Expanded" : "Collapsed" } ?? "")
     }
 
     private func showDiscover(browseAll: Bool) {
         section = .discover
         detailID = nil
+        isDiscoverExpanded = true
         browseAllCommunity = browseAll
         searches[.discover] = ""
     }
@@ -422,6 +443,7 @@ struct ContentView: View {
                 .padding(2)
                 .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 9))
             }
+            if section != .account { accountButton }
         }
         .padding(.horizontal, 24)
         .padding(.top, 13)
@@ -452,9 +474,24 @@ struct ContentView: View {
                 .help("Refresh Discover")
                 .disabled(isLoadingCommunity)
             }
+            accountButton
         }
         .padding(.horizontal, 12).frame(height: 48)
         .background(.white.opacity(0.045))
+    }
+
+    private var accountButton: some View {
+        Button {
+            section = .account
+            detailID = nil
+        } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: 17))
+                .frame(width: 32, height: 30).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Account")
+        .help("Account")
     }
 
     private var previewTabs: [WallpaperItem] {

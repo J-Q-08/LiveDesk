@@ -10,6 +10,8 @@ This build applies live wallpapers to the desktop. Lock Screen integration is an
 
 ## Release verification
 
+GitHub Actions builds an unsigned universal Release app for pull requests into `main`. The check verifies both architectures, the macOS 14 deployment target, and the bundled sample and icon. Use Xcode 27.2 for the same build locally.
+
 Run these checks on the candidate build and record the macOS version, display setup, and build commit with the results.
 
 1. With a fresh Library and no account, download a Discover wallpaper. Confirm the preview opens, then quit and reopen the app and play the downloaded video from Library.

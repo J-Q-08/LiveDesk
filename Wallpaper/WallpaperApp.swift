@@ -12,6 +12,10 @@ import SwiftUI
 struct WallpaperApp: App {
     @NSApplicationDelegateAdaptor(LiveDeskAppDelegate.self) private var appDelegate
 
+    init() {
+        GalleryStyle.registerFonts()
+    }
+
     var body: some Scene {
         WindowGroup("LiveDesk") {
             ContentView(desktop: appDelegate.desktop)

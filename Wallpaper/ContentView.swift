@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 import ServiceManagement
 
 struct ContentView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var playback: VideoPlayback?
     @ObservedObject var desktop: DesktopWallpaperController
     @State private var showVideoPicker = false
@@ -111,7 +112,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 sidebar
-                Divider()
                 VStack(spacing: 0) {
                     toolbar
                     if let downloadingTitle {
@@ -154,7 +154,8 @@ struct ContentView: View {
             }
             if !desktop.appliedVideoID.isEmpty { playbackBar }
         }
-        .background(GalleryStyle.background)
+        .background { AuroraMesh() }
+        .font(.custom("InterVariable", size: 13, relativeTo: .body))
         .preferredColorScheme(.dark)
         .tint(GalleryStyle.accent)
         .frame(minWidth: 980, minHeight: 640)
@@ -318,8 +319,11 @@ struct ContentView: View {
         .padding(.horizontal, 10).padding(.vertical, 12)
         .frame(width: 200)
         .background {
-            LinearGradient(colors: [GalleryStyle.railTop, GalleryStyle.sidebar, GalleryStyle.railBottom],
-                           startPoint: .top, endPoint: .bottom)
+            GalleryStyle.glass
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [GalleryStyle.violet.opacity(0.35), .clear],
+                                   startPoint: .top, endPoint: .bottom)
+                }
         }
     }
 
@@ -354,7 +358,12 @@ struct ContentView: View {
             .foregroundStyle(selected ? .white : Color.white.opacity(0.85))
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
             .padding(.horizontal, 8)
-            .background(selected ? GalleryStyle.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 8).fill(GalleryStyle.selection)
+                        .shadow(color: GalleryStyle.magenta.opacity(0.35), radius: 12)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -379,7 +388,7 @@ struct ContentView: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(detailID == nil ? section.title : "Wallpaper Preview")
-                    .font(.system(size: 28, weight: .semibold)).tracking(-0.7)
+                    .font(GalleryStyle.display(36)).tracking(-1.7)
                     .accessibilityAddTraits(.isHeader)
                 if detailID == nil {
                     Text(section.subtitle).font(.subheadline).foregroundStyle(.secondary)
@@ -451,8 +460,7 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 12).frame(height: 48)
-        .background(GalleryStyle.tabBar)
-        .overlay(alignment: .bottom) { Divider().allowsHitTesting(false) }
+        .background(GalleryStyle.glass)
     }
 
     private var previewTabs: [WallpaperItem] {
@@ -472,7 +480,11 @@ struct ContentView: View {
                 .lineLimit(1)
                 .frame(maxWidth: 136, alignment: .leading)
                 .padding(.horizontal, 10).frame(height: 28)
-                .background(.white.opacity(selected ? 0.23 : 0.08), in: RoundedRectangle(cornerRadius: 6))
+                .background {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(selected ? GalleryStyle.violet.opacity(0.72) : .white.opacity(0.08))
+                        .shadow(color: selected ? GalleryStyle.violet.opacity(0.85) : .clear, radius: 12)
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -491,41 +503,54 @@ struct ContentView: View {
 
     private var playbackBar: some View {
         let item = allItems.first { $0.id == desktop.appliedVideoID }
-        return HStack(spacing: 12) {
-            if let item {
-                VideoThumbnail(url: item.url)
-                    .frame(width: 54, height: 36)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .accessibilityHidden(true)
+        return ZStack(alignment: .leading) {
+            HStack(spacing: 12) {
+                if let item {
+                    VideoThumbnail(url: item.url)
+                        .frame(width: 54, height: 36)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                        .accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item?.name ?? "Desktop wallpaper")
+                        .font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(desktop.isDesktopPaused ? "Paused on all displays" : "All displays")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item?.name ?? "Desktop wallpaper").font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(desktop.isDesktopPaused ? "Paused on all displays" : "All displays")
-                    .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: 330, alignment: .leading)
+            HStack(spacing: 12) {
+                Button {
+                    desktop.setDesktopPaused(!desktop.isDesktopPaused)
+                } label: {
+                    Image(systemName: desktop.isDesktopPaused ? "play.fill" : "pause.fill")
+                        .foregroundStyle(GalleryStyle.background)
+                        .frame(width: 36, height: 36)
+                        .background(GalleryStyle.accent, in: Circle())
+                        .contentShape(Circle())
+                        .shadow(color: GalleryStyle.accent.opacity(0.6), radius: 12)
+                }
+                .accessibilityLabel(desktop.isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper")
+                .help(desktop.isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper")
+                .disabled(!desktop.canPause)
+                .opacity(desktop.canPause ? 1 : 0.45)
+                Button {
+                    desktop.stop()
+                    if browseFilter == .active { browseFilter = .all }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 34, height: 34)
+                        .background(.white.opacity(0.12), in: Circle())
+                        .contentShape(Circle())
+                }
+                .accessibilityLabel("Stop Wallpaper")
+                .help("Stop Wallpaper")
             }
-            Spacer(minLength: 20)
-            Button {
-                desktop.setDesktopPaused(!desktop.isDesktopPaused)
-            } label: {
-                Image(systemName: desktop.isDesktopPaused ? "play.fill" : "pause.fill")
-                    .frame(width: 36, height: 34).contentShape(Rectangle())
-            }
-            .accessibilityLabel(desktop.isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper")
-            .help(desktop.isDesktopPaused ? "Resume Wallpaper" : "Pause Wallpaper")
-            .disabled(!desktop.canPause)
-            Button {
-                desktop.stop()
-                if browseFilter == .active { browseFilter = .all }
-            } label: {
-                Image(systemName: "stop.fill").frame(width: 36, height: 34).contentShape(Rectangle())
-            }
-            .accessibilityLabel("Stop Wallpaper")
-            .help("Stop Wallpaper")
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 16).padding(.vertical, 7)
-        .background(.regularMaterial)
-        .overlay(alignment: .top) { Divider().allowsHitTesting(false) }
+        .padding(.horizontal, 20).padding(.vertical, 9)
+        .background(GalleryStyle.glass)
     }
 
     @ViewBuilder private var sectionView: some View {
@@ -545,14 +570,10 @@ struct ContentView: View {
         GeometryReader { geometry in
             let columnCount = max(1, Int((max(1, geometry.size.width - 48) + 16) / (220 + 16)))
             ScrollView {
-                if isGrid, libraryItems.count == 1, searchText.isEmpty, let item = libraryItems.first {
-                    wallpaperTile(item, prominent: true)
-                        .frame(maxWidth: 760)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 24).padding(.bottom, 20)
-                } else if isGrid {
-                    MasonryColumns(items: libraryItems, columnCount: columnCount) { item in
-                        wallpaperTile(item)
+                if isGrid {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top),
+                                             count: columnCount), alignment: .leading, spacing: 24) {
+                        ForEach(libraryItems) { item in wallpaperTile(item) }
                     }
                     .padding(.horizontal, 24).padding(.bottom, 20)
                 } else {
@@ -581,7 +602,7 @@ struct ContentView: View {
                 if let featured {
                     VStack(alignment: .leading, spacing: 22) {
                         let height = min(geometry.size.width * 0.53, max(320, geometry.size.height * 0.61))
-                        featuredWallpaper(featured, height: height)
+                        featuredWallpaper(featured, width: geometry.size.width, height: height)
                         if let communityError {
                             Text(communityError).foregroundStyle(.secondary).padding(.horizontal, 28)
                         }
@@ -646,44 +667,52 @@ struct ContentView: View {
         }
     }
 
-    private func featuredWallpaper(_ item: CommunityWallpaper, height: CGFloat) -> some View {
+    private func featuredWallpaper(_ item: CommunityWallpaper, width: CGFloat, height: CGFloat) -> some View {
         let isLocal = hasLocalCopy(of: item)
+        let reduceMotion = reduceMotion
+        let titleLimit: CGFloat = item.title.count > 40 ? 88 : 120
         return CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath), fillsFrame: true)
             .frame(height: height)
             .accessibilityHidden(true)
+            .visualEffect { effect, geometry in
+                let offset = max(0, -geometry.frame(in: .scrollView).minY)
+                return effect.scaleEffect(reduceMotion ? 1 : 1.08)
+                    .offset(y: reduceMotion ? 0 : min(height * 0.04, offset * 0.19))
+            }
             .overlay {
-                LinearGradient(stops: [.init(color: .black.opacity(0.66), location: 0),
-                                       .init(color: .clear, location: 0.51),
-                                       .init(color: .black.opacity(0.63), location: 1)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .allowsHitTesting(false)
+                ZStack {
+                    LinearGradient(colors: [GalleryStyle.background.opacity(0.91), GalleryStyle.violet.opacity(0.23), .clear],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    LinearGradient(colors: [.clear, GalleryStyle.magenta.opacity(0.42), GalleryStyle.accent.opacity(0.35)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                        .blendMode(.screen)
+                    LinearGradient(colors: [.clear, GalleryStyle.background.opacity(0.96)],
+                                   startPoint: .center, endPoint: .bottom)
+                }
+                .allowsHitTesting(false)
             }
             .overlay(alignment: .topLeading) {
                 Text(item.title)
-                    .font(.system(size: 42, weight: .bold)).tracking(-1.4)
+                    .font(GalleryStyle.display(min(titleLimit, width * 0.15), relativeTo: .largeTitle))
+                    .tracking(-3)
                     .lineLimit(2)
-                    .shadow(color: .black.opacity(0.5), radius: 9, y: 2)
+                    .minimumScaleFactor(0.36)
+                    .shadow(color: GalleryStyle.violet, radius: 20)
+                    .frame(maxWidth: width * 0.88, maxHeight: height * 0.68, alignment: .topLeading)
                     .accessibilityAddTraits(.isHeader)
                     .padding(.horizontal, 34).padding(.top, 32)
             }
             .overlay(alignment: .bottomLeading) {
-                HStack(spacing: 20) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Featured wallpaper").font(.subheadline.weight(.semibold))
-                        Text(isLocal ? "Saved in your Library" : "Available from the community")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
+                HStack(spacing: 18) {
                     Button { download(item) } label: {
                         Label(isLocal ? "Open in Library" : "Download", systemImage: isLocal ? "arrow.up.right" : "arrow.down")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(AuroraActionStyle())
                     .disabled(downloadingTitle != nil)
+                    Text(isLocal ? "Saved on this Mac" : "Community wallpaper")
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.84))
                 }
-                .padding(16).frame(width: 370)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15))
-                .overlay { RoundedRectangle(cornerRadius: 15).strokeBorder(.white.opacity(0.16)).allowsHitTesting(false) }
-                .padding(.leading, 28).padding(.bottom, 24)
+                .padding(.leading, 34).padding(.bottom, 28)
             }
             .clipped()
     }
@@ -691,9 +720,8 @@ struct ContentView: View {
     private func discoverShelf<Cards: View>(_ title: String, seeAll: @escaping () -> Void,
                                              @ViewBuilder cards: () -> Cards) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            Divider().padding(.horizontal, 28)
             HStack {
-                Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                Text(title).font(GalleryStyle.display(21)).tracking(-0.6).accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("See All", action: seeAll)
                     .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
@@ -701,7 +729,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 28)
             ScrollView(.horizontal) {
-                LazyHStack(alignment: .top, spacing: 14) { cards() }
+                HStack(alignment: .top, spacing: 14) { cards() }
                     .padding(.horizontal, 28).padding(.bottom, 8)
             }
         }
@@ -716,7 +744,7 @@ struct ContentView: View {
         let action = isLocal ? "Open in Library" : "Download to Library"
         return Button { download(item) } label: {
             GalleryTile(title: item.title, symbol: isLocal ? "arrow.up.right" : "arrow.down",
-                        subtitle: nil, prominent: false) {
+                        subtitle: nil, captionsBelow: false) {
                 CommunityThumbnail(url: CommunityService.mediaURL(path: item.thumbnailPath))
             }
         }
@@ -731,7 +759,7 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 13) {
-                    Label("Upload a wallpaper", systemImage: "square.and.arrow.up").font(.title2.weight(.semibold))
+                    Label("Upload a wallpaper", systemImage: "square.and.arrow.up").font(GalleryStyle.display(25))
                     Text("Choose a video up to 50 MB. LiveDesk saves a local copy and shares it in Discover.")
                         .foregroundStyle(.secondary)
                     if communityAuth.isRestoring {
@@ -749,13 +777,13 @@ struct ContentView: View {
                     Button { confirmingPublicImport = true } label: {
                         Label(isImporting ? "Uploading…" : "Upload and Share Video", systemImage: "square.and.arrow.up")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(AuroraActionStyle())
                     .disabled(isImporting || isPublishing || communityAuth.session == nil)
                 }
                 .padding(22)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 16))
-                .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
+                .background(GalleryStyle.glass, in: RoundedRectangle(cornerRadius: 18))
+                .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
                 if let videoError { Text(videoError).foregroundStyle(.red) }
                 if let cloudError, cloudOwnerID == communityAuth.session?.userID {
                     Text(cloudError).foregroundStyle(.orange)
@@ -818,7 +846,7 @@ struct ContentView: View {
                     Text("You can upload and share videos from the Upload section. Discover is available to everyone, including people who are signed out.")
                         .foregroundStyle(.secondary)
                     Button("Go to Upload") { section = .upload }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(AuroraActionStyle())
                     Button("Sign Out") {
                         Task {
                             do {
@@ -859,7 +887,7 @@ struct ContentView: View {
                     Button(isCreatingAccount ? "Create Account" : "Sign In") {
                         authenticate(createAccount: isCreatingAccount)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(AuroraActionStyle())
                     .disabled(isAuthenticating || communityAuth.isRestoring)
                     if isAuthenticating { ProgressView() }
                 }
@@ -870,8 +898,8 @@ struct ContentView: View {
             }
             .frame(maxWidth: 460, alignment: .leading)
             .padding(26)
-            .background(GalleryStyle.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
+            .background(GalleryStyle.glass, in: RoundedRectangle(cornerRadius: 18))
+            .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .padding(.horizontal, 24).padding(.bottom, 24)
         }
@@ -916,11 +944,11 @@ struct ContentView: View {
         }
     }
 
-    private func wallpaperTile(_ item: WallpaperItem, prominent: Bool = false) -> some View {
+    private func wallpaperTile(_ item: WallpaperItem) -> some View {
         Button { openDetail(item) } label: {
             GalleryTile(title: item.name, symbol: "play.fill",
                         subtitle: desktop.appliedVideoID == item.id ? "Current wallpaper" : nil,
-                        prominent: prominent) {
+                        captionsBelow: true) {
                 VideoThumbnail(url: item.url)
             }
         }
@@ -948,49 +976,51 @@ struct ContentView: View {
 
     private func detailView(_ item: WallpaperItem) -> some View {
         let currentPlayback = playback?.sourceURL == item.url ? playback : nil
-        return VStack(alignment: .leading, spacing: 18) {
-            Button { detailID = nil } label: { Label("Back to \(section.rawValue)", systemImage: "chevron.left") }
-                .buttonStyle(.plain)
-            HStack {
-                Text(item.name).font(.largeTitle.bold())
-                Spacer()
-                if let video = library.first(where: { $0.id.uuidString == item.id }) {
-                    Menu {
-                        localVideoActions(video)
-                    } label: {
-                        Label("Manage Local Copy", systemImage: "ellipsis.circle")
-                            .labelStyle(.iconOnly)
-                    }
-                    .help("Manage Local Copy")
-                    .fixedSize()
-                }
+        return VStack(alignment: .leading, spacing: 16) {
+            Button { detailID = nil } label: {
+                Label("Back to \(section.rawValue)", systemImage: "chevron.left")
             }
-            VideoCanvas(player: currentPlayback?.previewPlayer, videoSize: currentPlayback?.videoSize ?? .zero,
-                        videoLayout: videoLayout, isPreview: true)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.black, in: RoundedRectangle(cornerRadius: 12))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .id("\(displayConfiguration)-\(currentPlayback?.id.uuidString ?? "none")")
-                .overlay {
-                    if let previewError {
-                        ContentUnavailableView("Preview unavailable", systemImage: "film",
-                                               description: Text(previewError))
-                    } else if currentPlayback == nil {
-                        ProgressView("Loading preview…")
+            .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
+            HStack(alignment: .top, spacing: 22) {
+                VideoCanvas(player: currentPlayback?.previewPlayer, videoSize: currentPlayback?.videoSize ?? .zero,
+                            videoLayout: videoLayout, isPreview: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                    .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
+                    .id("\(displayConfiguration)-\(currentPlayback?.id.uuidString ?? "none")")
+                    .overlay {
+                        if let previewError {
+                            ContentUnavailableView("Preview unavailable", systemImage: "film", description: Text(previewError))
+                        } else if currentPlayback == nil {
+                            ProgressView("Loading preview…")
+                        }
                     }
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(item.name)
+                        .font(GalleryStyle.display(32)).tracking(-1.2)
+                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                        .shadow(color: GalleryStyle.magenta.opacity(0.65), radius: 20)
+                    Picker("Video layout", selection: $videoLayout) {
+                        ForEach(VideoLayout.allCases) { layout in Text(layout.rawValue).tag(layout) }
+                    }
+                    Button("Set as Desktop Background") { setDesktopBackground(item) }
+                        .buttonStyle(AuroraActionStyle()).disabled(currentPlayback == nil)
+                    Button("Export Still Image…") { exportStillImage(from: item.url) }
+                        .buttonStyle(.plain).foregroundStyle(GalleryStyle.accent)
+                        .disabled(currentPlayback == nil)
+                    if let video = library.first(where: { $0.id.uuidString == item.id }) {
+                        Menu("Manage Local Copy") { localVideoActions(video) }
+                            .fixedSize()
+                    }
+                    if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
                 }
-            HStack {
-                Picker("Video layout", selection: $videoLayout) {
-                    ForEach(VideoLayout.allCases) { layout in Text(layout.rawValue).tag(layout) }
-                }
-                .frame(maxWidth: 260)
-                Spacer()
-                Button("Export Still Image…") { exportStillImage(from: item.url) }
-                    .disabled(currentPlayback == nil)
-                Button("Set as Desktop Background") { setDesktopBackground(item) }
-                    .buttonStyle(.borderedProminent).disabled(currentPlayback == nil)
+                .padding(20)
+                .frame(width: 270, alignment: .leading)
+                .background(GalleryStyle.glass, in: RoundedRectangle(cornerRadius: 22))
+                .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(GalleryStyle.border).allowsHitTesting(false) }
             }
-            if let videoError { Text(videoError).foregroundStyle(.red).font(.callout) }
         }
         .padding(24)
         .task(id: item.id) {
@@ -1394,59 +1424,59 @@ private enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
-private enum GalleryStyle {
-    static let background = Color(red: 0.093, green: 0.105, blue: 0.126)
-    static let railTop = Color(red: 0.16, green: 0.25, blue: 0.34)
-    static let sidebar = Color(red: 0.10, green: 0.16, blue: 0.22)
-    static let railBottom = Color(red: 0.067, green: 0.105, blue: 0.15)
-    static let tabBar = Color(red: 0.16, green: 0.20, blue: 0.23)
-    static let selection = Color(red: 0.02, green: 0.38, blue: 0.73)
-    static let surface = Color(red: 0.105, green: 0.132, blue: 0.187)
-    static let accent = Color(red: 0.41, green: 0.73, blue: 1)
-    static let border = Color.white.opacity(0.09)
-}
-
 private struct GalleryTile<Artwork: View>: View {
     let title: String
     let symbol: String
     let subtitle: String?
-    let prominent: Bool
+    let captionsBelow: Bool
     @ViewBuilder let artwork: () -> Artwork
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: prominent ? 17 : 12)
-        artwork()
-            .overlay(alignment: .bottomLeading) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: prominent ? 24 : 13, weight: .semibold))
-                        .lineLimit(2)
-                    if let subtitle {
-                        Text(subtitle).font(.caption).foregroundStyle(.white.opacity(0.8))
+        let shape = RoundedRectangle(cornerRadius: 13)
+        VStack(alignment: .leading, spacing: 8) {
+            artwork()
+                .overlay(alignment: .bottomLeading) {
+                    if !captionsBelow {
+                        caption
+                            .padding(.top, 30).padding([.horizontal, .bottom], 12)
+                            .background {
+                                LinearGradient(colors: [.clear, GalleryStyle.background.opacity(0.94)],
+                                               startPoint: .top, endPoint: .bottom)
+                            }
                     }
                 }
-                .foregroundStyle(.white)
-                .padding(.top, prominent ? 56 : 27)
-                .padding(.horizontal, prominent ? 22 : 12)
-                .padding(.bottom, prominent ? 19 : 11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background {
-                    LinearGradient(colors: [.clear, .black.opacity(0.86)], startPoint: .top, endPoint: .bottom)
+                .overlay(alignment: .topTrailing) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isHovered ? GalleryStyle.background : .white)
+                        .frame(width: 31, height: 31)
+                        .background(isHovered ? GalleryStyle.accent : .black.opacity(0.59), in: Circle())
+                        .padding(9)
                 }
+                .clipShape(shape)
+                .overlay { shape.strokeBorder(isHovered ? GalleryStyle.accent : GalleryStyle.border).allowsHitTesting(false) }
+                .shadow(color: isHovered ? GalleryStyle.accent.opacity(0.42) : .clear, radius: 14)
+            if captionsBelow { caption.padding(.horizontal, 2) }
+        }
+        .contentShape(Rectangle())
+        .offset(y: isHovered && !reduceMotion ? -3 : 0)
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.72), value: isHovered)
+        .onHover { isHovered = $0 }
+    }
+
+    private var caption: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.custom("InterVariable", size: 13, relativeTo: .subheadline).weight(.semibold))
+                .lineLimit(2)
+                .foregroundStyle(.white)
+            if let subtitle {
+                Text(subtitle).font(.caption).foregroundStyle(GalleryStyle.accent)
             }
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: symbol)
-                    .font(.system(size: prominent ? 15 : 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: prominent ? 42 : 29, height: prominent ? 42 : 29)
-                    .background(.black.opacity(0.56), in: Circle())
-                    .padding(prominent ? 16 : 8)
-            }
-            .clipShape(shape)
-            .overlay { shape.strokeBorder(isHovered ? GalleryStyle.accent : GalleryStyle.border).allowsHitTesting(false) }
-            .contentShape(shape)
-            .onHover { isHovered = $0 }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

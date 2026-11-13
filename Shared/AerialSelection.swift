@@ -3,6 +3,10 @@ import Foundation
 enum AerialSelection {
     static let categoryID = "1DA60D58-7B3F-4A52-A441-879D57DD0001"
 
+    static func requestURL(for token: UUID, in store: URL) -> URL {
+        store.appendingPathComponent("livedesk-\(token.uuidString).request")
+    }
+
     static func indexURL(in store: URL) -> URL {
         store.appendingPathComponent("Store/Index.plist")
     }

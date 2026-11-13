@@ -1,35 +1,95 @@
 // Adapted from CaveWall (MIT License, copyright 2026 Rishav Bairagya).
 // See THIRD_PARTY_NOTICES.md for license and source.
+// The temporal HEVC compression setup is adapted from macos-custom-video-wallpaper-fix (MIT License, copyright 2026 AlexisBCD).
+// See THIRD_PARTY_NOTICES.md for license and source.
 import AppKit
 import AVFoundation
+import CoreImage
+import CoreVideo
 import VideoToolbox
 
 private final class AerialWriterPipeline: @unchecked Sendable {
-    nonisolated(unsafe) let writerInput: AVAssetWriterInput
-    nonisolated(unsafe) let readerOutput: AVAssetReaderTrackOutput
-    nonisolated(unsafe) let writer: AVAssetWriter
-    nonisolated let finished: CheckedContinuation<Void, Never>
+    private let lock = NSLock()
+    private let destination: URL
+    private let transform: CGAffineTransform
+    nonisolated(unsafe) private var writer: AVAssetWriter?
+    nonisolated(unsafe) private var input: AVAssetWriterInput?
+    nonisolated(unsafe) private var failure: String?
 
-    nonisolated init(writerInput: AVAssetWriterInput, readerOutput: AVAssetReaderTrackOutput,
-                     writer: AVAssetWriter, finished: CheckedContinuation<Void, Never>) {
-        self.writerInput = writerInput
-        self.readerOutput = readerOutput
-        self.writer = writer
-        self.finished = finished
+    nonisolated init(destination: URL, transform: CGAffineTransform) {
+        self.destination = destination
+        self.transform = transform
     }
 
-    nonisolated func drain() {
-        while writerInput.isReadyForMoreMediaData {
-            guard let sample = readerOutput.copyNextSampleBuffer() else {
-                writerInput.markAsFinished()
-                writer.finishWriting { self.finished.resume() }
+    nonisolated func append(status: OSStatus, sampleBuffer: CMSampleBuffer?) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard failure == nil else { return }
+        guard status == noErr else {
+            failure = "VideoToolbox did not return an encoded video frame (\(status))."
+            return
+        }
+        guard let sampleBuffer else { return }
+        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            failure = "VideoToolbox returned a frame without a video format."
+            return
+        }
+
+        if writer == nil {
+            do {
+                let writer = try AVAssetWriter(outputURL: destination, fileType: .mov)
+                let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: format)
+                input.expectsMediaDataInRealTime = false
+                input.transform = transform
+                guard writer.canAdd(input) else {
+                    failure = "The Lock Screen video writer rejected the encoded video track."
+                    return
+                }
+                writer.add(input)
+                guard writer.startWriting() else {
+                    failure = writer.error?.localizedDescription ?? "The Lock Screen video writer could not start."
+                    return
+                }
+                writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+                self.writer = writer
+                self.input = input
+            } catch {
+                failure = error.localizedDescription
                 return
             }
-            guard writerInput.append(sample) else {
-                writer.cancelWriting()
-                finished.resume()
-                return
-            }
+        }
+
+        guard let writer, let input else { return }
+        while !input.isReadyForMoreMediaData && writer.status == .writing {
+            usleep(500)
+        }
+        guard writer.status == .writing, input.append(sampleBuffer) else {
+            failure = writer.error?.localizedDescription ?? "The Lock Screen video could not be written."
+            writer.cancelWriting()
+            return
+        }
+    }
+
+    nonisolated func finish() throws {
+        lock.lock()
+        if let failure {
+            lock.unlock()
+            throw LiveDeskAerialRegistrar.RegistrarError.transcodeFailed(failure)
+        }
+        guard let writer, let input else {
+            lock.unlock()
+            throw LiveDeskAerialRegistrar.RegistrarError.transcodeFailed("the encoder produced no frames")
+        }
+        input.markAsFinished()
+        lock.unlock()
+
+        let finished = DispatchSemaphore(value: 0)
+        writer.finishWriting { finished.signal() }
+        finished.wait()
+        guard writer.status == .completed else {
+            throw LiveDeskAerialRegistrar.RegistrarError.transcodeFailed(
+                writer.error?.localizedDescription ?? "the encoded video could not be finalized")
         }
     }
 }
@@ -37,6 +97,7 @@ private final class AerialWriterPipeline: @unchecked Sendable {
 /// Registers videos in the private per-user Aerial catalog used by macOS Wallpaper.
 enum LiveDeskAerialRegistrar {
     nonisolated private static let subcategoryID = "1DA60D58-7B3F-4A52-A441-879D57DD0002"
+    nonisolated private static let encodingVersion = 3
     @MainActor private static var isInstalling = false
 
     enum RegistrarError: LocalizedError {
@@ -59,7 +120,7 @@ enum LiveDeskAerialRegistrar {
         }
     }
 
-    /// Writes video-only Main10 HEVC with regular keyframes for the Aerial player.
+    /// Writes video-only Main10 HEVC with temporal sublayers required by the Aerial lock transition.
     nonisolated private static func transcodeToHEVC(source: URL, destination: URL) async throws {
         try? FileManager.default.removeItem(at: destination)
         let asset = AVURLAsset(url: source)
@@ -67,16 +128,12 @@ enum LiveDeskAerialRegistrar {
             throw RegistrarError.transcodeFailed("no video track in that file")
         }
 
-        // Output size: cap the long edge at 1920 (a wallpaper doesn't need 4K).
         let (t, naturalSize, nominalFrameRate) = try await track.load(
             .preferredTransform, .naturalSize, .nominalFrameRate)
         let srcW = abs(naturalSize.width), srcH = abs(naturalSize.height)
         guard srcW.isFinite, srcH.isFinite, srcW > 0, srcH > 0 else {
             throw RegistrarError.transcodeFailed("invalid video dimensions")
         }
-        let scale = min(1.0, 1920.0 / max(srcW, srcH))
-        let outW = max(2, Int((srcW * scale / 2).rounded()) * 2)   // even dimensions
-        let outH = max(2, Int((srcH * scale / 2).rounded()) * 2)
         let fps = nominalFrameRate > 0 ? Int(nominalFrameRate.rounded()) : 30
 
         let reader = try AVAssetReader(asset: asset)
@@ -88,45 +145,140 @@ enum LiveDeskAerialRegistrar {
         readerOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(readerOutput) else { throw RegistrarError.transcodeFailed("reader setup failed") }
         reader.add(readerOutput)
-
-        let writer = try AVAssetWriter(outputURL: destination, fileType: .mov)
-        let compression: [String: Any] = [
-            AVVideoAverageBitRateKey: 12_000_000,
-            AVVideoMaxKeyFrameIntervalKey: fps,          // a keyframe about every second
-            AVVideoMaxKeyFrameIntervalDurationKey: 1.0,
-            AVVideoAllowFrameReorderingKey: false,       // no B-frames → clean seeks
-            AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main10_AutoLevel as String
-        ]
-        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.hevc,
-            AVVideoWidthKey: outW,
-            AVVideoHeightKey: outH,
-            AVVideoCompressionPropertiesKey: compression
-        ])
-        writerInput.expectsMediaDataInRealTime = false
-        writerInput.transform = t
-        guard writer.canAdd(writerInput) else { throw RegistrarError.transcodeFailed("writer setup failed") }
-        writer.add(writerInput)
-
-        guard reader.startReading(), writer.startWriting() else {
-            throw RegistrarError.transcodeFailed(
-                writer.error?.localizedDescription ?? reader.error?.localizedDescription ?? "start failed")
+        guard reader.startReading() else {
+            throw RegistrarError.transcodeFailed(reader.error?.localizedDescription ?? "the video reader could not start")
         }
-        writer.startSession(atSourceTime: .zero)
+        guard let firstSample = readerOutput.copyNextSampleBuffer(),
+              let firstPixelBuffer = CMSampleBufferGetImageBuffer(firstSample) else {
+            throw RegistrarError.transcodeFailed(reader.error?.localizedDescription ?? "the video contains no readable frames")
+        }
+        let sourceWidth = CVPixelBufferGetWidth(firstPixelBuffer)
+        let sourceHeight = CVPixelBufferGetHeight(firstPixelBuffer)
+        let scale = min(1.0, 1920.0 / Double(max(sourceWidth, sourceHeight)))
+        let outputWidth = max(2, Int((Double(sourceWidth) * scale / 2).rounded()) * 2)
+        let outputHeight = max(2, Int((Double(sourceHeight) * scale / 2).rounded()) * 2)
+        let pixelBufferAttributes: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            kCVPixelBufferWidthKey: outputWidth,
+            kCVPixelBufferHeightKey: outputHeight,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]
+        ]
+        let poolAttributes: [CFString: Any] = [kCVPixelBufferPoolMinimumBufferCountKey: 3]
+        var pixelBufferPool: CVPixelBufferPool?
+        let poolStatus = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolAttributes as CFDictionary,
+            pixelBufferAttributes as CFDictionary,
+            &pixelBufferPool
+        )
+        guard poolStatus == kCVReturnSuccess, let pixelBufferPool else {
+            throw RegistrarError.transcodeFailed("could not allocate a 10-bit video buffer (\(poolStatus))")
+        }
+        let imageContext = CIContext(options: [.useSoftwareRenderer: false])
 
-        let queue = DispatchQueue(label: "LiveDesk.AerialTranscode")
-        await withCheckedContinuation { finished in
-            let pipeline = AerialWriterPipeline(writerInput: writerInput, readerOutput: readerOutput,
-                                                writer: writer, finished: finished)
-            writerInput.requestMediaDataWhenReady(on: queue) {
-                pipeline.drain()
+        func preparePixelBuffer(_ source: CVPixelBuffer) throws -> CVPixelBuffer {
+            let width = CVPixelBufferGetWidth(source)
+            let height = CVPixelBufferGetHeight(source)
+            guard width != outputWidth || height != outputHeight else { return source }
+            var destination: CVPixelBuffer?
+            let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pixelBufferPool, &destination)
+            guard status == kCVReturnSuccess, let destination else {
+                throw RegistrarError.transcodeFailed("could not resize a video frame (\(status))")
+            }
+            let image = CIImage(cvPixelBuffer: source).transformed(by: CGAffineTransform(
+                scaleX: CGFloat(outputWidth) / CGFloat(width),
+                y: CGFloat(outputHeight) / CGFloat(height)
+            ))
+            imageContext.render(image, to: destination,
+                                bounds: CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight),
+                                colorSpace: nil)
+            return destination
+        }
+
+        let pipeline = AerialWriterPipeline(destination: destination, transform: t)
+        let outputCallback: VTCompressionOutputCallback = { callbackContext, _, status, _, sampleBuffer in
+            guard let callbackContext else { return }
+            let pipeline = Unmanaged<AerialWriterPipeline>.fromOpaque(callbackContext).takeUnretainedValue()
+            pipeline.append(status: status, sampleBuffer: sampleBuffer)
+        }
+        var compressionSession: VTCompressionSession?
+        let encoderSpecification: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true
+        ]
+        let createStatus = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: Int32(outputWidth),
+            height: Int32(outputHeight),
+            codecType: kCMVideoCodecType_HEVC,
+            encoderSpecification: encoderSpecification as CFDictionary,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: outputCallback,
+            refcon: Unmanaged.passUnretained(pipeline).toOpaque(),
+            compressionSessionOut: &compressionSession
+        )
+        guard createStatus == noErr, let session = compressionSession else {
+            throw RegistrarError.transcodeFailed("VideoToolbox could not create a hardware HEVC encoder (\(createStatus)).")
+        }
+        defer { VTCompressionSessionInvalidate(session) }
+
+        func setEncoderProperty(_ key: CFString, value: CFTypeRef) throws {
+            let status = VTSessionSetProperty(session, key: key, value: value)
+            guard status == noErr else {
+                throw RegistrarError.transcodeFailed("VideoToolbox rejected a required Lock Screen encoding setting (\(status)).")
             }
         }
+        try setEncoderProperty(kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
+        try setEncoderProperty(kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main10_AutoLevel)
+        try setEncoderProperty(kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanTrue)
+        try setEncoderProperty(kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: fps))
+        try setEncoderProperty(kVTCompressionPropertyKey_MaxKeyFrameInterval, value: NSNumber(value: fps * 5))
+        try setEncoderProperty(kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: 12_000_000))
+        try setEncoderProperty(kVTCompressionPropertyKey_ColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        try setEncoderProperty(kVTCompressionPropertyKey_TransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        try setEncoderProperty(kVTCompressionPropertyKey_YCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+        try setEncoderProperty(kVTCompressionPropertyKey_AllowTemporalCompression, value: kCFBooleanTrue)
+        try setEncoderProperty(kVTCompressionPropertyKey_BaseLayerFrameRate, value: NSNumber(value: Double(fps) / 2.0))
 
-        guard writer.status == .completed, reader.status == .completed else {
-            throw RegistrarError.transcodeFailed(
-                writer.error?.localizedDescription ?? reader.error?.localizedDescription ?? "encode failed")
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
+        guard prepareStatus == noErr else {
+            throw RegistrarError.transcodeFailed("VideoToolbox could not prepare the temporal video encoder (\(prepareStatus)).")
         }
+
+        func encode(_ sample: CMSampleBuffer) throws {
+            guard let sourcePixelBuffer = CMSampleBufferGetImageBuffer(sample) else {
+                throw RegistrarError.transcodeFailed("the video contains an unreadable frame")
+            }
+            let pixelBuffer = try preparePixelBuffer(sourcePixelBuffer)
+            var duration = CMSampleBufferGetDuration(sample)
+            if !duration.isValid || duration.value == 0 {
+                duration = CMTime(value: 1, timescale: Int32(fps))
+            }
+            let status = VTCompressionSessionEncodeFrame(
+                session,
+                imageBuffer: pixelBuffer,
+                presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sample),
+                duration: duration,
+                frameProperties: nil,
+                sourceFrameRefcon: nil,
+                infoFlagsOut: nil
+            )
+            guard status == noErr else {
+                throw RegistrarError.transcodeFailed("VideoToolbox could not encode a Lock Screen frame (\(status)).")
+            }
+        }
+        try encode(firstSample)
+        while let sample = readerOutput.copyNextSampleBuffer() {
+            try encode(sample)
+        }
+        guard reader.status == .completed else {
+            throw RegistrarError.transcodeFailed(reader.error?.localizedDescription ?? "the video reader stopped before the end")
+        }
+        let finishStatus = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        guard finishStatus == noErr else {
+            throw RegistrarError.transcodeFailed("VideoToolbox could not finish the Lock Screen video (\(finishStatus)).")
+        }
+        try pipeline.finish()
     }
 
     @MainActor static func install(videoURL: URL, title: String, libraryID: String, in store: URL) async throws -> String {
@@ -149,6 +301,7 @@ enum LiveDeskAerialRegistrar {
         if let registered = assets.first(where: { asset in
             guard asset["liveDeskLibraryID"] as? String == libraryID,
                   asset["localizedNameKey"] as? String == title,
+                  asset["liveDeskAerialEncodingVersion"] as? Int == encodingVersion,
                   let id = asset["id"] as? String, UUID(uuidString: id) != nil else { return false }
             return files.isReadableFile(atPath: aerials.appendingPathComponent("videos/\(id).mov").path) &&
                 files.isReadableFile(atPath: aerials.appendingPathComponent("thumbnails/\(id).png").path)
@@ -202,6 +355,7 @@ enum LiveDeskAerialRegistrar {
             assets.append([
                 "id": assetID,
                 "liveDeskLibraryID": libraryID,
+                "liveDeskAerialEncodingVersion": encodingVersion,
                 "shotID": "LIVEDESK_\(assetID)",
                 "localizedNameKey": title,
                 "accessibilityLabel": title,

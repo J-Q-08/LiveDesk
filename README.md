@@ -12,7 +12,7 @@ Live Lock Screen requires macOS Tahoe (26) or later. Open a video from **Library
 
 The first time, LiveDesk explains the one-time folder permission. Click **Continue**. In the folder picker, keep the preselected `com.apple.wallpaper` folder and click **Allow Access**. If you navigated away, press **Shift–Command–G**, enter `~/Library/Application Support/com.apple.wallpaper`, then click **Allow Access**. LiveDesk saves that permission on this Mac, so later wallpapers do not ask again.
 
-If LiveDesk says the Apple Aerial catalog is missing, click **Open Wallpaper Settings**, download and select one of Apple’s moving wallpapers, return to LiveDesk, and click **Set as Live Lock Screen** again. After LiveDesk confirms the video is selected, press **Control–Command–Q** to check the Lock Screen.
+If LiveDesk says the Apple Aerial catalog is missing, click **Open Wallpaper Settings**, download and select one of Apple’s moving wallpapers, return to LiveDesk, and click **Set as Live Lock Screen** again. LiveDesk prepares a separate HEVC copy for the Lock Screen animation; the original stays in your Library for desktop playback. After LiveDesk confirms the video is selected, press **Control–Command–Q** to check the Lock Screen.
 
 macOS links the Lock Screen Aerial to its system wallpaper across Spaces and displays. LiveDesk installs the video in the per-user Aerial catalog; Apple may change that private format in a future macOS release.
 

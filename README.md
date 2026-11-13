@@ -6,7 +6,15 @@ To upload a custom video, create an account or sign in on the **Account** page, 
 
 Open `Wallpaper.xcodeproj` in Xcode and run the Wallpaper scheme. The project targets macOS 14 or later. Community metadata is in the Supabase `public.wallpapers` table, and media is in the public `wallpapers` Storage bucket. The schema and row-level security policies are in `supabase/migrations/`. The app contains a publishable key only; it never contains a service role or secret key. Authentication sessions are kept in Keychain. Builds without a provisioned data protection Keychain entitlement use the macOS login Keychain. Use a consistent signing identity for sign-in persistence checks across rebuilds. Existing prototype users may need to sign in once after upgrading from the earlier Keychain entry. Community videos must be playable MP4, MOV, or M4V files up to 50 MB. LiveDesk checks the video before adding it to Library, including when it downloads a wallpaper from Discover.
 
-On macOS Tahoe or later, open a video in Library and choose **Set as Live Lock Screen**. The first time, grant access to the `com.apple.wallpaper` folder. LiveDesk remembers the grant and applies the selected video directly on future clicks. macOS links the Lock Screen Aerial to the system desktop wallpaper across Spaces and displays. LiveDesk uses the per-user Aerial catalog and may need updates when macOS changes its format.
+## Set a video as your Lock Screen
+
+Live Lock Screen requires macOS Tahoe (26) or later. Open a video from **Library**, then choose **Set as Live Lock Screen**.
+
+The first time, LiveDesk explains the one-time folder permission. Click **Continue**. In the folder picker, keep the preselected `com.apple.wallpaper` folder and click **Allow Access**. If you navigated away, press **Shift–Command–G**, enter `~/Library/Application Support/com.apple.wallpaper`, then click **Allow Access**. LiveDesk saves that permission on this Mac, so later wallpapers do not ask again.
+
+If LiveDesk says the Apple Aerial catalog is missing, click **Open Wallpaper Settings**, download and select one of Apple’s moving wallpapers, return to LiveDesk, and click **Set as Live Lock Screen** again. After LiveDesk confirms the video is selected, press **Control–Command–Q** to check the Lock Screen.
+
+macOS links the Lock Screen Aerial to its system wallpaper across Spaces and displays. LiveDesk installs the video in the per-user Aerial catalog; Apple may change that private format in a future macOS release.
 
 ## Release verification
 
@@ -19,3 +27,4 @@ Run these checks on the candidate build and record the macOS version, display se
 3. Disconnect the test Mac from the network. Confirm the sidebar reports the connection problem and downloaded Library videos still play. Reconnect and verify Discover refreshes. In a test backend, interrupt publishing after the media upload and retry. Verify there is one catalog entry for the video.
 4. Apply a wallpaper, quit and reopen, and confirm playback resumes on the desktop. Repeat with two displays, then disconnect and reconnect the external display. Verify the video remains behind desktop icons across Spaces. Pause and resume playback, then stop it and verify the wallpaper does not return after relaunch.
 5. Install the candidate in Applications, apply a wallpaper, and enable **Launch at Login**. Sign out of the test macOS account and sign back in. Verify LiveDesk opens and restores the wallpaper. Disable the toggle and repeat the sign-in to verify LiveDesk stays closed. Before distributing, validate signing, notarization, and first launch on a Mac without the development build or existing app data. Test the oldest supported macOS version and both processor architectures included in the release.
+6. On a fresh macOS Tahoe profile, select an Apple moving wallpaper in System Settings, open a Library video in LiveDesk, and choose **Set as Live Lock Screen**. Confirm the one-time folder picker opens at `com.apple.wallpaper`, grant access, and verify a second video can be selected without another picker. Lock the Mac with **Control–Command–Q** and confirm the chosen video visibly moves on the Lock Screen. Record the macOS version and build commit.

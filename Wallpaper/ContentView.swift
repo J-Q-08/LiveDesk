@@ -1009,9 +1009,9 @@ struct ContentView: View {
                         .buttonStyle(GlassActionStyle())
                         .disabled(currentPlayback == nil || isPreparingLockScreen)
                         if lockScreenVideoID == item.id {
-                            Label("Lock Screen updated", systemImage: "checkmark.circle")
+                            Label("Selected for Lock Screen", systemImage: "checkmark.circle")
                                 .font(.callout).foregroundStyle(.secondary)
-                            Text("Press Control–Command–Q to see it.")
+                            Text("Press Control–Command–Q to check your Lock Screen.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }

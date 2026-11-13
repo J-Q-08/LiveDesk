@@ -5,13 +5,29 @@
 //  Created by Jeff on 2026-11-05.
 //
 
+import AppKit
 import SwiftUI
 
 @main
 struct WallpaperApp: App {
+    @NSApplicationDelegateAdaptor(LiveDeskAppDelegate.self) private var appDelegate
+
+    init() {
+        GalleryStyle.registerFonts()
+    }
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        WindowGroup("LiveDesk") {
+            ContentView(desktop: appDelegate.desktop)
         }
+    }
+}
+
+@MainActor
+final class LiveDeskAppDelegate: NSObject, NSApplicationDelegate {
+    let desktop = DesktopWallpaperController()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        desktop.restoreIfNeeded()
     }
 }

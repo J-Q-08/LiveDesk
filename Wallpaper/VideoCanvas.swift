@@ -27,30 +27,38 @@ struct VideoCanvas: NSViewRepresentable {
 }
 
 final class VideoCanvasView: NSView {
+    private let viewport = CALayer()
     private let verticalTiles = CAReplicatorLayer()
     private let horizontalTiles = CAReplicatorLayer()
     private let videoLayer = AVPlayerLayer()
     private var videoSize: CGSize = .zero
     private var videoLayout: VideoLayout = .fill
     private var isPreview = false
+    private var desktopBackingScale: CGFloat?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        layer?.masksToBounds = true
-        layer?.addSublayer(verticalTiles)
+        viewport.masksToBounds = true
+        layer?.addSublayer(viewport)
+        viewport.addSublayer(verticalTiles)
         verticalTiles.addSublayer(horizontalTiles)
         horizontalTiles.addSublayer(videoLayer)
+        NotificationCenter.default.addObserver(self, selector: #selector(screenDidChange(_:)),
+                                               name: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
 
-    func configure(player: AVPlayer?, videoSize: CGSize, layout: VideoLayout, isPreview: Bool) {
+    func configure(player: AVPlayer?, videoSize: CGSize, layout: VideoLayout, isPreview: Bool,
+                   desktopBackingScale: CGFloat? = nil) {
         videoLayer.player = player
         self.videoSize = videoSize
         videoLayout = layout
         self.isPreview = isPreview
+        self.desktopBackingScale = desktopBackingScale
         updateGeometry()
     }
 
@@ -59,7 +67,25 @@ final class VideoCanvasView: NSView {
         updateGeometry()
     }
 
-    func refreshGeometry() { updateGeometry() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        if let window {
+            center.addObserver(self, selector: #selector(screenDidChange(_:)),
+                               name: NSWindow.didChangeScreenNotification, object: window)
+        }
+        updateGeometry()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateGeometry()
+    }
+
+    @objc private func screenDidChange(_ notification: Notification) {
+        updateGeometry()
+    }
 
     private func updateGeometry() {
         guard bounds.width > 0, bounds.height > 0 else { return }
@@ -75,43 +101,29 @@ final class VideoCanvasView: NSView {
         let canvas = CGRect(x: (bounds.width - canvasSize.width) / 2,
                             y: (bounds.height - canvasSize.height) / 2,
                             width: canvasSize.width, height: canvasSize.height)
-        let screenScale = screen?.backingScaleFactor ?? 1.0
+        let screenScale = desktopBackingScale ?? screen?.backingScaleFactor ?? 1.0
         let tileSize = CGSize(width: videoSize.width / screenScale * previewScale,
                               height: videoSize.height / screenScale * previewScale)
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        verticalTiles.frame = bounds
-        horizontalTiles.frame = canvas
+        viewport.frame = canvas
+        verticalTiles.frame = viewport.bounds
+        horizontalTiles.frame = verticalTiles.bounds
         verticalTiles.instanceCount = 1
         horizontalTiles.instanceCount = 1
         verticalTiles.instanceTransform = CATransform3DIdentity
         horizontalTiles.instanceTransform = CATransform3DIdentity
 
         switch videoLayout {
-        case .fit:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
-            }
+        case .fit, .fill, .stretch:
             videoLayer.frame = horizontalTiles.bounds
-            videoLayer.videoGravity = .resizeAspect
-        case .fill:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
+            switch videoLayout {
+            case .fit: videoLayer.videoGravity = .resizeAspect
+            case .fill: videoLayer.videoGravity = .resizeAspectFill
+            default: videoLayer.videoGravity = .resize
             }
-            videoLayer.frame = horizontalTiles.bounds
-            videoLayer.videoGravity = .resizeAspectFill
-        case .stretch:
-            // Use the view's full bounds so both axes match the display exactly.
-            if videoLayer.superlayer !== layer {
-                layer?.addSublayer(videoLayer)
-            }
-            videoLayer.frame = bounds
-            videoLayer.videoGravity = .resize
         case .center, .tile:
-            if videoLayer.superlayer !== horizontalTiles {
-                horizontalTiles.addSublayer(videoLayer)
-            }
             guard tileSize.width > 0, tileSize.height > 0 else {
                 videoLayer.frame = .zero
                 CATransaction.commit()
